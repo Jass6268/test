@@ -59,7 +59,8 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         url_index = context.args.index("-n") - 1
         url = context.args[url_index]
-        filename = context.args[url_index + 2]
+        name_index = context.args.index("-n") + 1
+        filename = " ".join(context.args[name_index:])
         temp_file_path = os.path.join(tempfile.gettempdir(), filename)
 
         msg = await update.message.reply_text("⏳ Starting download...")
