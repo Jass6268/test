@@ -78,11 +78,11 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        shutil.move(final_path, dest_path)
-        os.system(f"termux-media-scan {dest_path}")
-
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
+        await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
         await asyncio.sleep(30)
-        os.remove(dest_path)
+        await loop.run_in_executor(None, lambda: os.remove(dest_path))
 
         await update.message.reply_text(f"✅ File uploaded and deleted from device: {filename}")
 
@@ -117,15 +117,16 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         uploaded_files = 0
+        loop = asyncio.get_event_loop()
         for root, dirs, files in os.walk(extract_path):
             for file in files:
                 src = os.path.join(root, file)
                 dst = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
-                shutil.copy(src, dst)
-                os.system(f"termux-media-scan {dst}")
+                await loop.run_in_executor(None, lambda s=src, d=dst: shutil.copy(s, d))
+                await loop.run_in_executor(None, lambda d=dst: os.system(f"termux-media-scan '{d}'"))
                 uploaded_files += 1
                 await asyncio.sleep(1)
-                os.remove(dst)
+                await loop.run_in_executor(None, lambda d=dst: os.remove(d))
 
         shutil.rmtree(temp_dir)
 
@@ -142,10 +143,11 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         deleted = 0
+        loop = asyncio.get_event_loop()
         for file in os.listdir(GOOGLE_PHOTOS_FOLDER):
             path = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
             if os.path.isfile(path):
-                os.remove(path)
+                await loop.run_in_executor(None, lambda p=path: os.remove(p))
                 deleted += 1
         await update.message.reply_text(f"🧹 Deleted {deleted} file(s) from {GOOGLE_PHOTOS_FOLDER}")
     except Exception as e:
