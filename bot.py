@@ -9,7 +9,7 @@ import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
+GOOGLE_PHOTOS_FOLDER = "/sdcard/Downloads/"  # Update this if needed
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     async with aiohttp.ClientSession() as session:
@@ -64,6 +64,7 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.move(final_path, dest_path)
         os.system(f"termux-media-scan {dest_path}")
 
@@ -123,6 +124,18 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
+async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        deleted = 0
+        for file in os.listdir(GOOGLE_PHOTOS_FOLDER):
+            path = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
+            if os.path.isfile(path):
+                os.remove(path)
+                deleted += 1
+        await update.message.reply_text(f"🧹 Deleted {deleted} file(s) from {GOOGLE_PHOTOS_FOLDER}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error while cleaning: {e}")
+
 if __name__ == '__main__':
     import logging
 
@@ -133,6 +146,7 @@ if __name__ == '__main__':
 
     app.add_handler(CommandHandler("l", handle_l))
     app.add_handler(CommandHandler("unzip", handle_unzip))
+    app.add_handler(CommandHandler("clean", handle_clean))
 
     print("🤖 Bot running...")
     app.run_polling()
