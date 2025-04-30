@@ -18,6 +18,23 @@ logging.basicConfig(
 
 GOOGLE_PHOTOS_FOLDER = "/sdcard/Downloads/"  # Update this if needed
 
+async def get_filename_from_url(session, url):
+    try:
+        async with session.head(url, allow_redirects=True) as resp:
+            cd = resp.headers.get("Content-Disposition")
+            if cd and "filename=" in cd:
+                filename = cd.split("filename=")[1].strip("\"")
+                return filename
+        async with session.get(url, allow_redirects=True) as resp:
+            cd = resp.headers.get("Content-Disposition")
+            if cd and "filename=" in cd:
+                filename = cd.split("filename=")[1].strip("\"")
+                return filename
+    except:
+        pass
+    parsed = urlparse(url)
+    return os.path.basename(parsed.path) or "file.mp4"
+
 async def download_with_progress(url, dest_path, message, context, chat_id):
     try:
         async with aiohttp.ClientSession() as session:
@@ -155,13 +172,10 @@ async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         url = update.message.text.strip()
-        if not (url.endswith(".mkv") or url.endswith(".mp4")):
-            return
+        async with aiohttp.ClientSession() as session:
+            filename = await get_filename_from_url(session, url)
 
-        parsed_url = urlparse(url)
-        filename = os.path.basename(parsed_url.path)
         temp_file_path = os.path.join(tempfile.gettempdir(), filename)
-
         msg = await update.message.reply_text(f"⏳ Downloading {filename}...")
         final_path = await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
 
@@ -180,6 +194,7 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logging.exception("Error in handle_direct_link")
         await update.message.reply_text(f"❌ Error: {e}")
+
 
 if __name__ == '__main__':
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
