@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import zipfile
 import rarfile
+import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -15,21 +16,27 @@ async def download_with_progress(url, dest_path, message, context, chat_id):
         async with session.get(url) as resp:
             total = int(resp.headers.get('content-length', 0))
             downloaded = 0
-            chunk_size = 1024 * 1024
+            chunk_size = 4 * 1024 * 1024  # 4MB chunks
+            start_time = time.time()
+            last_update_time = time.time()
             with open(dest_path, 'wb') as f:
                 async for chunk in resp.content.iter_chunked(chunk_size):
                     f.write(chunk)
                     downloaded += len(chunk)
-                    percent = (downloaded / total) * 100
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message.message_id,
-                            text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)"
-                        )
-                    except:
-                        pass
-                    await asyncio.sleep(5)
+                    current_time = time.time()
+                    elapsed_time = current_time - start_time
+                    speed = downloaded / 1024 / 1024 / elapsed_time  # in MB/s
+                    if current_time - last_update_time >= 5:
+                        percent = (downloaded / total) * 100
+                        try:
+                            await context.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=message.message_id,
+                                text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
+                            )
+                        except:
+                            pass
+                        last_update_time = current_time
     return dest_path
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
