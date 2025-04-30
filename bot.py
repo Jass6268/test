@@ -10,6 +10,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 GOOGLE_PHOTOS_FOLDER = "/data/media/0/DCIM/Camera/"  # Change if needed
 
+BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"
+
 async def download_with_progress(url, dest_path, message, context, chat_id):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
