@@ -8,7 +8,7 @@ import rarfile
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-GOOGLE_PHOTOS_FOLDER = "/data/media/0/DCIM/Camera/"  # Change if needed
+GOOGLE_PHOTOS_FOLDER = "/data/media/0/DCIM/Camera/"  # Change this if needed for your device
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     async with aiohttp.ClientSession() as session:
@@ -29,6 +29,7 @@ async def download_with_progress(url, dest_path, message, context, chat_id):
                         )
                     except:
                         pass
+                    await asyncio.sleep(5)
     return dest_path
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,17 +46,19 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("⏳ Starting download...")
         await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
 
-        dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
-        shutil.move(temp_file_path, dest_path)
-
-        await asyncio.sleep(30)
-        os.remove(dest_path)
-
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"✅ Uploaded and deleted: {filename}"
+            text=f"✅ Download complete: {filename}"
         )
+
+        dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
+        shutil.move(temp_file_path, dest_path)
+
+        await asyncio.sleep(30)  # Wait for Google Photos to sync it
+        os.remove(dest_path)
+
+        await update.message.reply_text(f"✅ File uploaded and deleted from device: {filename}")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -112,7 +115,7 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.INFO)
 
-    BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace this with your actual bot token
+    BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your bot token
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("l", handle_l))
