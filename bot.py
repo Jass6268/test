@@ -7,8 +7,9 @@ import zipfile
 import rarfile
 import time
 import logging
+from urllib.parse import urlparse
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -81,10 +82,8 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
         await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
-        await asyncio.sleep(30)
-        await loop.run_in_executor(None, lambda: os.remove(dest_path))
 
-        await update.message.reply_text(f"✅ File uploaded and deleted from device: {filename}")
+        await update.message.reply_text(f"✅ File uploaded to device: {filename}")
 
     except Exception as e:
         logging.exception("Error in handle_l")
@@ -126,14 +125,13 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await loop.run_in_executor(None, lambda d=dst: os.system(f"termux-media-scan '{d}'"))
                 uploaded_files += 1
                 await asyncio.sleep(1)
-                await loop.run_in_executor(None, lambda d=dst: os.remove(d))
 
         shutil.rmtree(temp_dir)
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"✅ Extracted and uploaded {uploaded_files} file(s), then deleted."
+            text=f"✅ Extracted and uploaded {uploaded_files} file(s)."
         )
 
     except Exception as e:
@@ -154,6 +152,35 @@ async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.exception("Error in handle_clean")
         await update.message.reply_text(f"❌ Error while cleaning: {e}")
 
+async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        url = update.message.text.strip()
+        if not (url.endswith(".mkv") or url.endswith(".mp4")):
+            return
+
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        temp_file_path = os.path.join(tempfile.gettempdir(), filename)
+
+        msg = await update.message.reply_text(f"⏳ Downloading {filename}...")
+        final_path = await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
+
+        dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
+        await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
+
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Downloaded and saved: {filename}"
+        )
+
+    except Exception as e:
+        logging.exception("Error in handle_direct_link")
+        await update.message.reply_text(f"❌ Error: {e}")
+
 if __name__ == '__main__':
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -167,9 +194,13 @@ if __name__ == '__main__':
     async def wrapper_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_clean(update, context))
 
+    async def wrapper_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_direct_link(update, context))
+
     app.add_handler(CommandHandler("l", wrapper_l))
     app.add_handler(CommandHandler("unzip", wrapper_unzip))
     app.add_handler(CommandHandler("clean", wrapper_clean))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wrapper_direct))
 
     print("🤖 Bot running...")
     app.run_polling()
