@@ -9,7 +9,7 @@ import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-GOOGLE_PHOTOS_FOLDER = "/storage/downloads/"  # Change this if needed for your device
+GOOGLE_PHOTOS_FOLDER = "/sdcard/Download/"  # Change this if needed for your device
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     async with aiohttp.ClientSession() as session:
