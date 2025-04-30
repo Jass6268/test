@@ -6,45 +6,57 @@ import tempfile
 import zipfile
 import rarfile
 import time
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 GOOGLE_PHOTOS_FOLDER = "/sdcard/Downloads/"  # Update this if needed
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            total = int(resp.headers.get('content-length', 0))
-            downloaded = 0
-            chunk_size = 4 * 1024 * 1024
-            start_time = time.time()
-            last_update_time = time.time()
-            with open(dest_path, 'wb') as f:
-                async for chunk in resp.content.iter_chunked(chunk_size):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    current_time = time.time()
-                    elapsed_time = current_time - start_time
-                    speed = downloaded / 1024 / 1024 / elapsed_time
-                    if current_time - last_update_time >= 5:
-                        percent = (downloaded / total) * 100
-                        try:
-                            await context.bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=message.message_id,
-                                text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
-                            )
-                        except:
-                            pass
-                        last_update_time = current_time
-    return dest_path
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                total = int(resp.headers.get('content-length', 0))
+                downloaded = 0
+                chunk_size = 4 * 1024 * 1024
+                start_time = time.time()
+                last_update_time = time.time()
+                with open(dest_path, 'wb') as f:
+                    async for chunk in resp.content.iter_chunked(chunk_size):
+                        f.write(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+                        downloaded += len(chunk)
+                        current_time = time.time()
+                        elapsed_time = current_time - start_time
+                        speed = downloaded / 1024 / 1024 / elapsed_time
+                        if current_time - last_update_time >= 5:
+                            percent = (downloaded / total) * 100
+                            try:
+                                await context.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=message.message_id,
+                                    text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
+                                )
+                            except Exception:
+                                pass
+                            last_update_time = current_time
+        return dest_path
+    except Exception as e:
+        logging.exception("Error during download:")
+        raise e
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 3 or "-n" not in context.args:
-        await update.message.reply_text("❌ Usage: /l <url> -n <filename>")
-        return
-
     try:
+        if len(context.args) < 3 or "-n" not in context.args:
+            await update.message.reply_text("❌ Usage: /l <url> -n <filename>")
+            return
+
         url_index = context.args.index("-n") - 1
         url = context.args[url_index]
         filename = context.args[url_index + 2]
@@ -74,19 +86,20 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ File uploaded and deleted from device: {filename}")
 
     except Exception as e:
+        logging.exception("Error in handle_l")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 1:
-        await update.message.reply_text("❌ Usage: /unzip <url>")
-        return
-
-    url = context.args[0]
-    temp_dir = tempfile.mkdtemp()
-    archive_name = os.path.join(temp_dir, "archive")
-    msg = await update.message.reply_text("⏳ Starting archive download...")
-
     try:
+        if len(context.args) < 1:
+            await update.message.reply_text("❌ Usage: /unzip <url>")
+            return
+
+        url = context.args[0]
+        temp_dir = tempfile.mkdtemp()
+        archive_name = os.path.join(temp_dir, "archive")
+        msg = await update.message.reply_text("⏳ Starting archive download...")
+
         downloaded_path = await download_with_progress(url, archive_name, msg, context, update.effective_chat.id)
 
         extract_path = os.path.join(temp_dir, "extracted")
@@ -122,6 +135,7 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
+        logging.exception("Error in handle_unzip")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,13 +148,10 @@ async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 deleted += 1
         await update.message.reply_text(f"🧹 Deleted {deleted} file(s) from {GOOGLE_PHOTOS_FOLDER}")
     except Exception as e:
+        logging.exception("Error in handle_clean")
         await update.message.reply_text(f"❌ Error while cleaning: {e}")
 
 if __name__ == '__main__':
-    import logging
-
-    logging.basicConfig(level=logging.INFO)
-
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
