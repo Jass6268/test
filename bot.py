@@ -9,14 +9,14 @@ import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-GOOGLE_PHOTOS_FOLDER = "/sdcard/Downloads/"  # Change this if needed for your device
+GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             total = int(resp.headers.get('content-length', 0))
             downloaded = 0
-            chunk_size = 4 * 1024 * 1024  # 4MB chunks
+            chunk_size = 4 * 1024 * 1024
             start_time = time.time()
             last_update_time = time.time()
             with open(dest_path, 'wb') as f:
@@ -25,7 +25,7 @@ async def download_with_progress(url, dest_path, message, context, chat_id):
                     downloaded += len(chunk)
                     current_time = time.time()
                     elapsed_time = current_time - start_time
-                    speed = downloaded / 1024 / 1024 / elapsed_time  # in MB/s
+                    speed = downloaded / 1024 / 1024 / elapsed_time
                     if current_time - last_update_time >= 5:
                         percent = (downloaded / total) * 100
                         try:
@@ -51,7 +51,11 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_file_path = os.path.join(tempfile.gettempdir(), filename)
 
         msg = await update.message.reply_text("⏳ Starting download...")
-        await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
+        final_path = await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
+
+        if not os.path.exists(final_path):
+            await update.message.reply_text("❌ Download failed. File not found.")
+            return
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -60,9 +64,10 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
-        shutil.move(temp_file_path, dest_path)
+        shutil.move(final_path, dest_path)
+        os.system(f"termux-media-scan {dest_path}")
 
-        await asyncio.sleep(30)  # Wait for Google Photos to sync it
+        await asyncio.sleep(30)
         os.remove(dest_path)
 
         await update.message.reply_text(f"✅ File uploaded and deleted from device: {filename}")
@@ -102,6 +107,7 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 src = os.path.join(root, file)
                 dst = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
                 shutil.copy(src, dst)
+                os.system(f"termux-media-scan {dst}")
                 uploaded_files += 1
                 await asyncio.sleep(1)
                 os.remove(dst)
@@ -122,7 +128,7 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.INFO)
 
-    BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your bot token
+    BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("l", handle_l))
