@@ -16,7 +16,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-GOOGLE_PHOTOS_FOLDER = "/sdcard/Downloads/"  # Update this if needed
+GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
 
 async def get_filename_from_url(session, url):
     try:
