@@ -206,31 +206,24 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Removing app from recent tasks..."
+            text="⏳ Waiting for app to close..."
         )
         
         # Wait a bit
-        await asyncio.sleep(2)
-        
-        # Try to remove the app from recent tasks list
-        await loop.run_in_executor(None, lambda: os.system("am clear-task com.google.android.apps.photos"))
-        
-        await asyncio.sleep(1)
+        await asyncio.sleep(3)
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Starting Google Photos with new task..."
+            text="⏳ Starting Google Photos..."
         )
         
-        # Start with explicit flags to create a new task
+        # Use only supported flags
         start_cmd = (
             "am start -n com.google.android.apps.photos/.home.HomeActivity " +
-            "--activity-clear-top " +
-            "--activity-reset-task-if-needed " +
-            "--activity-no-history " + 
-            "--activity-exclude-from-recents " +
-            "--activity-new-task"
+            "-a android.intent.action.MAIN " +
+            "-c android.intent.category.LAUNCHER " +
+            "--activity-clear-task"
         )
         
         await loop.run_in_executor(None, lambda: os.system(start_cmd))
