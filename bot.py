@@ -199,9 +199,21 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         msg = await update.message.reply_text("🔄 Stopping Google Photos...")
         
-        # Stop Google Photos using killall command
+        # Kill the Photos app process
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
+        await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
+        
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="⏳ Clearing app from recent tasks..."
+        )
+        
+        # Clear the app from recent tasks to ensure clean restart
+        await loop.run_in_executor(None, lambda: os.system("am clear-recent-tasks"))
+        
+        # Sleep for a moment to ensure app fully closes
+        await asyncio.sleep(2)
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -209,11 +221,13 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
             text="⏳ Restarting Google Photos..."
         )
         
-        # Sleep for a moment to ensure app fully closes
-        await asyncio.sleep(2)
-        
-        # Start Google Photos again
-        await loop.run_in_executor(None, lambda: os.system("am start -n com.google.android.apps.photos/.home.HomeActivity"))
+        # Start Google Photos with different flags to force a new task
+        await loop.run_in_executor(None, lambda: os.system(
+            "am start -n com.google.android.apps.photos/.home.HomeActivity " + 
+            "-a android.intent.action.MAIN " + 
+            "-c android.intent.category.LAUNCHER " + 
+            "--activity-clear-task --activity-clear-top"
+        ))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
