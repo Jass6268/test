@@ -195,6 +195,36 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logging.exception("Error in handle_direct_link")
         await update.message.reply_text(f"❌ Error: {e}")
 
+async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
+        
+        # Force stop Google Photos
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: os.system("am force-stop com.google.android.apps.photos"))
+        
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="⏳ Restarting Google Photos..."
+        )
+        
+        # Sleep for a moment to ensure app fully closes
+        await asyncio.sleep(2)
+        
+        # Start Google Photos again
+        await loop.run_in_executor(None, lambda: os.system("am start -n com.google.android.apps.photos/.home.HomeActivity"))
+        
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="✅ Google Photos restarted successfully!"
+        )
+        
+    except Exception as e:
+        logging.exception("Error restarting Google Photos")
+        await update.message.reply_text(f"❌ Error restarting Google Photos: {e}")
+
 
 if __name__ == '__main__':
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
@@ -209,6 +239,9 @@ if __name__ == '__main__':
     async def wrapper_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_clean(update, context))
 
+    async def wrapper_restart_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_restart_photos(update, context))
+
     async def wrapper_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_direct_link(update, context))
 
@@ -216,6 +249,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("unzip", wrapper_unzip))
     app.add_handler(CommandHandler("clean", wrapper_clean))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wrapper_direct))
+    app.add_handler(CommandHandler("restart_photos", wrapper_restart_photos))
 
     print("🤖 Bot running...")
     app.run_polling()
