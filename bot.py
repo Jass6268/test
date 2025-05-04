@@ -199,37 +199,38 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         msg = await update.message.reply_text("🔄 Stopping Google Photos...")
         
-        # Try multiple methods to kill the app
+        # First kill the app process
         loop = asyncio.get_event_loop()
-        
-        # Kill the Photos app process
-        await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
-        
-        # Force close any running activities
-        await loop.run_in_executor(None, lambda: os.system("am kill-all"))
+        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Waiting for processes to end..."
+            text="⏳ Removing app from recent tasks..."
         )
         
-        # Give the system time to process the kill commands
-        await asyncio.sleep(3)
+        # Wait a bit
+        await asyncio.sleep(2)
+        
+        # Try to remove the app from recent tasks list
+        await loop.run_in_executor(None, lambda: os.system("am clear-task com.google.android.apps.photos"))
+        
+        await asyncio.sleep(1)
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Restarting Google Photos..."
+            text="⏳ Starting Google Photos with new task..."
         )
         
-        # Start with extreme flags to force new instance
+        # Start with explicit flags to create a new task
         start_cmd = (
-            "am start-activity -n com.google.android.apps.photos/.home.HomeActivity " +
-            "-a android.intent.action.MAIN " +
-            "-c android.intent.category.LAUNCHER " +
-            "--activity-brought-to-front --activity-clear-task --activity-clear-top " +
-            "--activity-exclude-from-recents --activity-multiple-task --activity-reset-task-if-needed"
+            "am start -n com.google.android.apps.photos/.home.HomeActivity " +
+            "--activity-clear-top " +
+            "--activity-reset-task-if-needed " +
+            "--activity-no-history " + 
+            "--activity-exclude-from-recents " +
+            "--activity-new-task"
         )
         
         await loop.run_in_executor(None, lambda: os.system(start_cmd))
