@@ -199,21 +199,23 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         msg = await update.message.reply_text("🔄 Stopping Google Photos...")
         
-        # Kill the Photos app process
+        # Try multiple methods to kill the app
         loop = asyncio.get_event_loop()
+        
+        # Kill the Photos app process
         await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
+        
+        # Force close any running activities
+        await loop.run_in_executor(None, lambda: os.system("am kill-all"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Clearing app from recent tasks..."
+            text="⏳ Waiting for processes to end..."
         )
         
-        # Clear the app from recent tasks to ensure clean restart
-        await loop.run_in_executor(None, lambda: os.system("am clear-recent-tasks"))
-        
-        # Sleep for a moment to ensure app fully closes
-        await asyncio.sleep(2)
+        # Give the system time to process the kill commands
+        await asyncio.sleep(3)
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -221,13 +223,16 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
             text="⏳ Restarting Google Photos..."
         )
         
-        # Start Google Photos with different flags to force a new task
-        await loop.run_in_executor(None, lambda: os.system(
-            "am start -n com.google.android.apps.photos/.home.HomeActivity " + 
-            "-a android.intent.action.MAIN " + 
-            "-c android.intent.category.LAUNCHER " + 
-            "--activity-clear-task --activity-clear-top"
-        ))
+        # Start with extreme flags to force new instance
+        start_cmd = (
+            "am start-activity -n com.google.android.apps.photos/.home.HomeActivity " +
+            "-a android.intent.action.MAIN " +
+            "-c android.intent.category.LAUNCHER " +
+            "--activity-brought-to-front --activity-clear-task --activity-clear-top " +
+            "--activity-exclude-from-recents --activity-multiple-task --activity-reset-task-if-needed"
+        )
+        
+        await loop.run_in_executor(None, lambda: os.system(start_cmd))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
