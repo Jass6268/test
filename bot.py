@@ -197,11 +197,11 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
+        msg = await update.message.reply_text("🔄 Stopping Google Photos...")
         
-        # Force stop Google Photos
+        # Stop Google Photos using killall command
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: os.system("am force-stop com.google.android.apps.photos"))
+        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
