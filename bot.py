@@ -197,28 +197,31 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Attempting to stop Google Photos...")
+        msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
         
-        # Use pkill first as a basic approach
+        # Use multiple pkill commands with different signals
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
         
-        # Try using input keyevent to simulate pressing HOME first (to get out of the app)
-        await loop.run_in_executor(None, lambda: os.system("input keyevent KEYCODE_HOME"))
+        # Try using regular pkill first
+        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
         await asyncio.sleep(1)
         
-        # Try to call settings app with app info for Photos
-        settings_cmd = (
-            "am start -a android.settings.APPLICATION_DETAILS_SETTINGS " +
-            "-d package:com.google.android.apps.photos"
-        )
-        await loop.run_in_executor(None, lambda: os.system(settings_cmd))
+        # Then use pkill with SIGKILL (-9) for forceful termination
+        await loop.run_in_executor(None, lambda: os.system("pkill -9 -f com.google.android.apps.photos"))
+        
+        # Try termux-clipboard-set to clear clipboard (optional)
+        await loop.run_in_executor(None, lambda: os.system("termux-clipboard-set ''"))
+        
+        # Try using dumpsys to stop activity (might work on some devices)
+        await loop.run_in_executor(None, lambda: os.system("dumpsys activity --stop com.google.android.apps.photos"))
+        
+        # Use input keyevent to press HOME (takes you away from app)
+        await loop.run_in_executor(None, lambda: os.system("input keyevent KEYCODE_HOME"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⚠️ Limited functionality: I've opened Google Photos settings. " +
-                 "Please manually tap 'Force Stop' in the app info screen."
+            text="✅ Attempted to force stop Google Photos! The app should be cleared from memory."
         )
         
     except Exception as e:
