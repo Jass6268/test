@@ -197,25 +197,25 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Stopping Google Photos completely...")
+        msg = await update.message.reply_text("🔄 Stopping Google Photos...")
         
         # Use pkill with different signals to ensure complete termination
         loop = asyncio.get_event_loop()
         
-        # First try SIGTERM for gentle termination
-        await loop.run_in_executor(None, lambda: os.system("pkill -SIGTERM -f com.google.android.apps.photos"))
+        # Try using pkill with SIGTERM first
+        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
         await asyncio.sleep(1)
         
-        # Then use SIGKILL for forceful termination if needed
-        await loop.run_in_executor(None, lambda: os.system("pkill -SIGKILL -f com.google.android.apps.photos"))
+        # Then use pkill with SIGKILL for forceful termination if needed
+        await loop.run_in_executor(None, lambda: os.system("pkill -9 -f com.google.android.apps.photos"))
         
-        # Additional method - use the Android activity manager to kill the process
-        await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
+        # Try using the service command as a last resort
+        await loop.run_in_executor(None, lambda: os.system("su -c 'am stop com.google.android.apps.photos'"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos has been completely stopped!"
+            text="✅ Google Photos has been stopped! Run /force_start to restart it."
         )
         
     except Exception as e:
