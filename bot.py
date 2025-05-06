@@ -197,39 +197,44 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
+        msg = await update.message.reply_text("⚡ Force-stopping Google Photos (ROOT)...")
         
-        # More comprehensive stopping approach
-        commands = [
-            # Try graceful stop first
-            "am force-stop com.google.android.apps.photos",
-            "pm disable com.google.android.apps.photos && pm enable com.google.android.apps.photos",
+        # Root-based killing commands (su -c)
+        kill_commands = [
+            # Method 1: Using 'am' with root (force-stop)
+            "su -c 'am force-stop com.google.android.apps.photos'",
             
-            # More forceful methods
-            "pkill -f com.google.android.apps.photos",
-            "pkill -9 -f com.google.android.apps.photos",
-            "killall -9 com.google.android.apps.photos",
+            # Method 2: Using 'killall' (root)
+            "su -c 'killall -9 com.google.android.apps.photos'",
             
-            # Clear app data and cache (requires root)
-            # "pm clear com.google.android.apps.photos",
+            # Method 3: Using 'pkill' (if available)
+            "su -c 'pkill -9 -f com.google.android.apps.photos'",
             
-            # Additional cleanup
-            "termux-clipboard-set ''",
-            "input keyevent KEYCODE_HOME"
+            # Method 4: Manual process ID killing (robust)
+            "su -c 'ps | grep com.google.android.apps.photos | grep -v grep | awk \"{print \\$2}\" | xargs kill -9'",
+            
+            # Clear app cache/data (optional)
+            # "su -c 'pm clear com.google.android.apps.photos'",
         ]
         
         loop = asyncio.get_event_loop()
-        for cmd in commands:
+        success = False
+        
+        for cmd in kill_commands:
             try:
-                await loop.run_in_executor(None, lambda c=cmd: os.system(c))
-                await asyncio.sleep(1)  # Small delay between commands
-            except:
+                exit_code = await loop.run_in_executor(None, lambda c=cmd: os.system(c))
+                if exit_code == 0:
+                    success = True
+                await asyncio.sleep(1)
+            except Exception as e:
                 continue
         
         # Verify if stopped
-        result = await loop.run_in_executor(None, lambda: os.popen("ps -A | grep com.google.android.apps.photos").read())
+        check_cmd = "su -c 'ps | grep com.google.android.apps.photos | grep -v grep'"
+        result = await loop.run_in_executor(None, lambda: os.popen(check_cmd).read())
+        
         if not result.strip():
-            status = "✅ Google Photos successfully stopped!"
+            status = "✅ Google Photos **force-stopped** (root)!"
         else:
             status = "⚠️ Google Photos might still be running (check manually)"
         
@@ -241,7 +246,7 @@ async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logging.exception("Error stopping Google Photos")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"❌ Root Error: {e}")
 
 async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
