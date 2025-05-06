@@ -195,35 +195,70 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logging.exception("Error in handle_direct_link")
         await update.message.reply_text(f"❌ Error: {e}")
 
-async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Stopping Google Photos...")
+        msg = await update.message.reply_text("⚡ Force-stopping Google Photos (ROOT)...")
         
-        # First kill the app process
+        # Root-based killing commands (su -c)
+        kill_commands = [
+            # Method 1: Using 'am' with root (force-stop)
+            "su -c 'am force-stop com.google.android.apps.photos'",
+            
+            # Method 2: Using 'killall' (root)
+            "su -c 'killall -9 com.google.android.apps.photos'",
+            
+            # Method 3: Using 'pkill' (if available)
+            "su -c 'pkill -9 -f com.google.android.apps.photos'",
+            
+            # Method 4: Manual process ID killing (robust)
+            "su -c 'ps | grep com.google.android.apps.photos | grep -v grep | awk \"{print \\$2}\" | xargs kill -9'",
+            
+            # Clear app cache/data (optional)
+            # "su -c 'pm clear com.google.android.apps.photos'",
+        ]
+        
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
+        success = False
+        
+        for cmd in kill_commands:
+            try:
+                exit_code = await loop.run_in_executor(None, lambda c=cmd: os.system(c))
+                if exit_code == 0:
+                    success = True
+                await asyncio.sleep(1)
+            except Exception as e:
+                continue
+        
+        # Verify if stopped
+        check_cmd = "su -c 'ps | grep com.google.android.apps.photos | grep -v grep'"
+        result = await loop.run_in_executor(None, lambda: os.popen(check_cmd).read())
+        
+        if not result.strip():
+            status = "✅ Google Photos **force-stopped** (root)!"
+        else:
+            status = "⚠️ Google Photos might still be running (check manually)"
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="⏳ Waiting for app to close..."
+            text=status
         )
         
-        # Wait a bit
-        await asyncio.sleep(3)
+    except Exception as e:
+        logging.exception("Error stopping Google Photos")
+        await update.message.reply_text(f"❌ Root Error: {e}")
+
+async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = await update.message.reply_text("⏳ Starting Google Photos...")
         
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text="⏳ Starting Google Photos..."
-        )
-        
-        # Use only supported flags
+        # Start Google Photos with flags to ensure a fresh start
+        loop = asyncio.get_event_loop()
         start_cmd = (
             "am start -n com.google.android.apps.photos/.home.HomeActivity " +
             "-a android.intent.action.MAIN " +
             "-c android.intent.category.LAUNCHER " +
-            "--activity-clear-task"
+            "--activity-clear-top"
         )
         
         await loop.run_in_executor(None, lambda: os.system(start_cmd))
@@ -231,12 +266,12 @@ async def handle_restart_photos(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos restarted successfully!"
+            text="✅ Google Photos started successfully!"
         )
         
     except Exception as e:
-        logging.exception("Error restarting Google Photos")
-        await update.message.reply_text(f"❌ Error restarting Google Photos: {e}")
+        logging.exception("Error starting Google Photos")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 if __name__ == '__main__':
@@ -252,17 +287,21 @@ if __name__ == '__main__':
     async def wrapper_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_clean(update, context))
 
-    async def wrapper_restart_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        asyncio.create_task(handle_restart_photos(update, context))
-
     async def wrapper_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_direct_link(update, context))
+
+    async def wrapper_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_force_stop(update, context))
+
+    async def wrapper_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_force_start(update, context))
 
     app.add_handler(CommandHandler("l", wrapper_l))
     app.add_handler(CommandHandler("unzip", wrapper_unzip))
     app.add_handler(CommandHandler("clean", wrapper_clean))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wrapper_direct))
-    app.add_handler(CommandHandler("restart_photos", wrapper_restart_photos))
+    app.add_handler(CommandHandler("force_stop", wrapper_force_stop))
+    app.add_handler(CommandHandler("force_start", wrapper_force_start))
 
     print("🤖 Bot running...")
     app.run_polling()
