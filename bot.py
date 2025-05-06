@@ -197,24 +197,25 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
+        msg = await update.message.reply_text("🔄 Stopping Google Photos completely...")
         
-        # Kill the app process - multiple approaches for better effectiveness
+        # Use pkill with different signals to ensure complete termination
         loop = asyncio.get_event_loop()
         
-        # Use pkill first
-        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
+        # First try SIGTERM for gentle termination
+        await loop.run_in_executor(None, lambda: os.system("pkill -SIGTERM -f com.google.android.apps.photos"))
+        await asyncio.sleep(1)
         
-        # Use am kill for system-level force close
+        # Then use SIGKILL for forceful termination if needed
+        await loop.run_in_executor(None, lambda: os.system("pkill -SIGKILL -f com.google.android.apps.photos"))
+        
+        # Additional method - use the Android activity manager to kill the process
         await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
-        
-        # Additional cleanup
-        await loop.run_in_executor(None, lambda: os.system("am clear-recent-tasks"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos has been stopped and removed from recents!"
+            text="✅ Google Photos has been completely stopped!"
         )
         
     except Exception as e:
@@ -225,13 +226,13 @@ async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         msg = await update.message.reply_text("⏳ Starting Google Photos...")
         
-        # Start Google Photos
+        # Start Google Photos with flags to ensure a fresh start
         loop = asyncio.get_event_loop()
         start_cmd = (
             "am start -n com.google.android.apps.photos/.home.HomeActivity " +
             "-a android.intent.action.MAIN " +
             "-c android.intent.category.LAUNCHER " +
-            "--activity-clear-task"
+            "--activity-clear-top"
         )
         
         await loop.run_in_executor(None, lambda: os.system(start_cmd))
