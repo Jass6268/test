@@ -199,29 +199,44 @@ async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
         
-        # Use multiple pkill commands with different signals
+        # More comprehensive stopping approach
+        commands = [
+            # Try graceful stop first
+            "am force-stop com.google.android.apps.photos",
+            "pm disable com.google.android.apps.photos && pm enable com.google.android.apps.photos",
+            
+            # More forceful methods
+            "pkill -f com.google.android.apps.photos",
+            "pkill -9 -f com.google.android.apps.photos",
+            "killall -9 com.google.android.apps.photos",
+            
+            # Clear app data and cache (requires root)
+            # "pm clear com.google.android.apps.photos",
+            
+            # Additional cleanup
+            "termux-clipboard-set ''",
+            "input keyevent KEYCODE_HOME"
+        ]
+        
         loop = asyncio.get_event_loop()
+        for cmd in commands:
+            try:
+                await loop.run_in_executor(None, lambda c=cmd: os.system(c))
+                await asyncio.sleep(1)  # Small delay between commands
+            except:
+                continue
         
-        # Try using regular pkill first
-        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
-        await asyncio.sleep(1)
-        
-        # Then use pkill with SIGKILL (-9) for forceful termination
-        await loop.run_in_executor(None, lambda: os.system("pkill -9 -f com.google.android.apps.photos"))
-        
-        # Try termux-clipboard-set to clear clipboard (optional)
-        await loop.run_in_executor(None, lambda: os.system("termux-clipboard-set ''"))
-        
-        # Try using dumpsys to stop activity (might work on some devices)
-        await loop.run_in_executor(None, lambda: os.system("dumpsys activity --stop com.google.android.apps.photos"))
-        
-        # Use input keyevent to press HOME (takes you away from app)
-        await loop.run_in_executor(None, lambda: os.system("input keyevent KEYCODE_HOME"))
+        # Verify if stopped
+        result = await loop.run_in_executor(None, lambda: os.popen("ps -A | grep com.google.android.apps.photos").read())
+        if not result.strip():
+            status = "✅ Google Photos successfully stopped!"
+        else:
+            status = "⚠️ Google Photos might still be running (check manually)"
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Attempted to force stop Google Photos! The app should be cleared from memory."
+            text=status
         )
         
     except Exception as e:
