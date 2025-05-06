@@ -199,18 +199,26 @@ async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await update.message.reply_text("🔄 Force stopping Google Photos...")
         
-        # Force stop the app
+        # Kill the app process - multiple approaches for better effectiveness
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: os.system("am force-stop com.google.android.apps.photos"))
+        
+        # Use pkill first
+        await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
+        
+        # Use am kill for system-level force close
+        await loop.run_in_executor(None, lambda: os.system("am kill com.google.android.apps.photos"))
+        
+        # Additional cleanup
+        await loop.run_in_executor(None, lambda: os.system("am clear-recent-tasks"))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos has been force stopped!"
+            text="✅ Google Photos has been stopped and removed from recents!"
         )
         
     except Exception as e:
-        logging.exception("Error force stopping Google Photos")
+        logging.exception("Error stopping Google Photos")
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,7 +230,8 @@ async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         start_cmd = (
             "am start -n com.google.android.apps.photos/.home.HomeActivity " +
             "-a android.intent.action.MAIN " +
-            "-c android.intent.category.LAUNCHER"
+            "-c android.intent.category.LAUNCHER " +
+            "--activity-clear-task"
         )
         
         await loop.run_in_executor(None, lambda: os.system(start_cmd))
