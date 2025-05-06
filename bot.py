@@ -197,25 +197,28 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🔄 Stopping Google Photos...")
+        msg = await update.message.reply_text("🔄 Attempting to stop Google Photos...")
         
-        # Use pkill with different signals to ensure complete termination
+        # Use pkill first as a basic approach
         loop = asyncio.get_event_loop()
-        
-        # Try using pkill with SIGTERM first
         await loop.run_in_executor(None, lambda: os.system("pkill -f com.google.android.apps.photos"))
+        
+        # Try using input keyevent to simulate pressing HOME first (to get out of the app)
+        await loop.run_in_executor(None, lambda: os.system("input keyevent KEYCODE_HOME"))
         await asyncio.sleep(1)
         
-        # Then use pkill with SIGKILL for forceful termination if needed
-        await loop.run_in_executor(None, lambda: os.system("pkill -9 -f com.google.android.apps.photos"))
-        
-        # Try using the service command as a last resort
-        await loop.run_in_executor(None, lambda: os.system("su -c 'am stop com.google.android.apps.photos'"))
+        # Try to call settings app with app info for Photos
+        settings_cmd = (
+            "am start -a android.settings.APPLICATION_DETAILS_SETTINGS " +
+            "-d package:com.google.android.apps.photos"
+        )
+        await loop.run_in_executor(None, lambda: os.system(settings_cmd))
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos has been stopped! Run /force_start to restart it."
+            text="⚠️ Limited functionality: I've opened Google Photos settings. " +
+                 "Please manually tap 'Force Stop' in the app info screen."
         )
         
     except Exception as e:
