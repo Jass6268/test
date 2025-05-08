@@ -17,15 +17,20 @@ logging.basicConfig(
 )
 
 GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
+MAX_RETRIES = 5
+CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunks for better performance
+PROGRESS_UPDATE_INTERVAL = 3  # Update progress every 3 seconds
+DOWNLOAD_TIMEOUT = 60 * 60  # 60 minutes timeout per download attempt
+
 
 async def get_filename_from_url(session, url):
     try:
-        async with session.head(url, allow_redirects=True) as resp:
+        async with session.head(url, allow_redirects=True, timeout=30) as resp:
             cd = resp.headers.get("Content-Disposition")
             if cd and "filename=" in cd:
                 filename = cd.split("filename=")[1].strip("\"")
                 return filename
-        async with session.get(url, allow_redirects=True) as resp:
+        async with session.get(url, allow_redirects=True, timeout=30) as resp:
             cd = resp.headers.get("Content-Disposition")
             if cd and "filename=" in cd:
                 filename = cd.split("filename=")[1].strip("\"")
@@ -36,38 +41,128 @@ async def get_filename_from_url(session, url):
     return os.path.basename(parsed.path) or "file.mp4"
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                total = int(resp.headers.get('content-length', 0))
-                downloaded = 0
-                chunk_size = 4 * 1024 * 1024
-                start_time = time.time()
-                last_update_time = time.time()
-                with open(dest_path, 'wb') as f:
-                    async for chunk in resp.content.iter_chunked(chunk_size):
-                        f.write(chunk)
-                        f.flush()
-                        os.fsync(f.fileno())
-                        downloaded += len(chunk)
-                        current_time = time.time()
-                        elapsed_time = current_time - start_time
-                        speed = downloaded / 1024 / 1024 / elapsed_time
-                        if current_time - last_update_time >= 5:
-                            percent = (downloaded / total) * 100
-                            try:
-                                await context.bot.edit_message_text(
-                                    chat_id=chat_id,
-                                    message_id=message.message_id,
-                                    text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
-                                )
-                            except Exception:
-                                pass
-                            last_update_time = current_time
-        return dest_path
-    except Exception as e:
-        logging.exception("Error during download:")
-        raise e
+    """Improved download function with resume capability"""
+    temp_download_path = f"{dest_path}.part"
+    start_byte = 0
+    retries = 0
+    success = False
+    
+    # Check if partial download exists
+    if os.path.exists(temp_download_path):
+        start_byte = os.path.getsize(temp_download_path)
+        logging.info(f"Resuming download from {start_byte} bytes")
+    
+    while retries < MAX_RETRIES and not success:
+        try:
+            timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                headers = {}
+                if start_byte > 0:
+                    headers['Range'] = f'bytes={start_byte}-'
+                
+                async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                    if resp.status not in [200, 206]:
+                        logging.error(f"Failed download, HTTP status: {resp.status}")
+                        await asyncio.sleep(2 * retries)  # Exponential backoff
+                        retries += 1
+                        continue
+                    
+                    # Get file size
+                    file_size = int(resp.headers.get('content-length', 0))
+                    if start_byte > 0 and resp.status == 206:
+                        total = start_byte + file_size
+                    else:
+                        total = file_size
+                        start_byte = 0  # Reset if we couldn't resume
+                    
+                    if total == 0:
+                        logging.warning("Content length is 0, using streaming mode")
+                    
+                    downloaded = start_byte
+                    mode = 'ab' if start_byte > 0 else 'wb'
+                    
+                    start_time = time.time()
+                    last_update_time = time.time()
+                    last_progress_percent = 0
+                    
+                    with open(temp_download_path, mode) as f:
+                        async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                            if not chunk:
+                                continue
+                            
+                            f.write(chunk)
+                            f.flush()
+                            os.fsync(f.fileno())
+                            
+                            downloaded += len(chunk)
+                            current_time = time.time()
+                            elapsed_time = current_time - start_time
+                            speed = downloaded / 1024 / 1024 / elapsed_time if elapsed_time > 0 else 0
+                            
+                            # Update progress at intervals or on significant progress
+                            if (current_time - last_update_time >= PROGRESS_UPDATE_INTERVAL or 
+                                (total > 0 and (downloaded / total) * 100 - last_progress_percent >= 5)):
+                                
+                                if total > 0:
+                                    percent = (downloaded / total) * 100
+                                    last_progress_percent = percent
+                                    progress_text = f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
+                                else:
+                                    progress_text = f"📥 Downloading...\nDownloaded: {downloaded//1024//1024}MB\nSpeed: {speed:.2f} MB/s"
+                                
+                                try:
+                                    await context.bot.edit_message_text(
+                                        chat_id=chat_id,
+                                        message_id=message.message_id,
+                                        text=progress_text
+                                    )
+                                except Exception as e:
+                                    logging.warning(f"Failed to update progress: {str(e)}")
+                                
+                                last_update_time = current_time
+                    
+                    # Rename temp file to destination file when complete
+                    shutil.move(temp_download_path, dest_path)
+                    success = True
+                    
+                    return dest_path
+        except asyncio.TimeoutError:
+            logging.warning(f"Download timeout, attempt {retries+1}/{MAX_RETRIES}")
+            if os.path.exists(temp_download_path):
+                start_byte = os.path.getsize(temp_download_path)
+            retries += 1
+            await asyncio.sleep(2 * retries)  # Exponential backoff
+            
+            # Update user about the retry
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    text=f"⚠️ Download timeout. Retrying ({retries}/{MAX_RETRIES})..."
+                )
+            except:
+                pass
+        except Exception as e:
+            logging.exception(f"Error during download (attempt {retries+1}/{MAX_RETRIES}): {str(e)}")
+            retries += 1
+            await asyncio.sleep(2 * retries)  # Exponential backoff
+            
+            # Update user about the retry
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    text=f"⚠️ Download error: {str(e)[:50]}... Retrying ({retries}/{MAX_RETRIES})..."
+                )
+            except:
+                pass
+    
+    if not success:
+        if os.path.exists(temp_download_path):
+            os.remove(temp_download_path)
+        raise Exception(f"Download failed after {MAX_RETRIES} attempts")
+    
+    return dest_path
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -91,7 +186,7 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"✅ Download complete: {filename}"
+            text=f"✅ Download complete: {filename}\n💾 Moving to Google Photos folder..."
         )
 
         dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, filename)
