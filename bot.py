@@ -39,7 +39,7 @@ async def get_filename_from_url(session, url):
 
 # Add this function for remuxing MKV files with metadata
 async def remux_with_metadata(input_path, author_tag="TG-@MoralMovies"):
-    """Remux an MKV file with metadata using mkvpropedit"""
+    """Remux an MKV file with metadata using FFmpeg"""
     try:
         logging.info(f"Starting remux for: {input_path}")
         
@@ -49,22 +49,18 @@ async def remux_with_metadata(input_path, author_tag="TG-@MoralMovies"):
         name, ext = os.path.splitext(file_name)
         output_path = os.path.join(output_dir, f"{name}_remuxed{ext}")
         
-        # Copy the original file to the output path
-        shutil.copy2(input_path, output_path)
-        
         # Extract title from filename (remove extension)
         title = os.path.splitext(file_name)[0]
         
-        # Set metadata using mkvpropedit
+        # Set metadata using FFmpeg
         cmd = [
-            'mkvpropedit', output_path,
-            '--edit', 'info',
-            '--set', f'title={title}'
+            'ffmpeg',
+            '-i', input_path,
+            '-c', 'copy',  # Stream copy (no re-encoding)
+            '-metadata', f'title={title}',
+            '-metadata', f'director={author_tag}',
+            output_path
         ]
-        
-        # Add author tag if provided
-        if author_tag:
-            cmd.extend(['--set', f'director={author_tag}'])
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
