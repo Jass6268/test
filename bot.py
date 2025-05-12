@@ -47,7 +47,7 @@ async def remux_with_metadata(input_path, author_tag="TG-@MoralMovies"):
         output_dir = os.path.dirname(input_path)
         file_name = os.path.basename(input_path)
         name, ext = os.path.splitext(file_name)
-        output_path = os.path.join(output_dir, f"{name}_remuxed{ext}")
+        output_path = os.path.join(output_dir, f"{name}{ext}")
         
         # Extract title from filename (remove extension)
         title = os.path.splitext(file_name)[0]
