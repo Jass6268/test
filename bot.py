@@ -39,7 +39,7 @@ async def get_filename_from_url(session, url):
 
 # Add this function for remuxing MKV files with metadata
 async def remux_with_metadata(input_path, author_tag="TG-@MoralMovies"):
-    """Remux an MKV file with metadata using FFmpeg"""
+    """Remux an MKV file with metadata using FFmpeg with better error handling"""
     try:
         logging.info(f"Starting remux for: {input_path}")
         
@@ -47,35 +47,30 @@ async def remux_with_metadata(input_path, author_tag="TG-@MoralMovies"):
         output_dir = os.path.dirname(input_path)
         file_name = os.path.basename(input_path)
         name, ext = os.path.splitext(file_name)
-        output_path = os.path.join(output_dir, f"{name}{ext}")
+        output_path = os.path.join(output_dir, f"{name}_remuxed{ext}")
         
         # Extract title from filename (remove extension)
-        title = os.path.splitext(file_name)[0]
+        title = name
         
-        # Set metadata using FFmpeg
-        cmd = [
-            'ffmpeg',
-            '-i', input_path,
-            '-c', 'copy',  # Stream copy (no re-encoding)
-            '-metadata', f'title={title}',
-            '-metadata', f'director={author_tag}',
-            output_path
-        ]
+        # Create the ffmpeg command
+        ffmpeg_command = f'ffmpeg -i "{input_path}" -c copy -metadata title="{title}" -metadata director="{author_tag}" "{output_path}" -y'
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        # Execute the command using os.system for simplicity
+        loop = asyncio.get_event_loop()
+        exit_code = await loop.run_in_executor(None, lambda: os.system(ffmpeg_command))
         
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            logging.error(f"Remux failed: {stderr.decode()}")
+        if exit_code != 0:
+            logging.error(f"Remux failed with exit code: {exit_code}")
             return None
         
-        logging.info(f"Successfully remuxed: {input_path} to {output_path}")
-        return output_path
+        # Verify the output file exists and has a reasonable size
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:  # At least 1KB
+            logging.info(f"Successfully remuxed: {input_path} to {output_path}")
+            return output_path
+        else:
+            logging.error(f"Remux failed: Output file missing or too small")
+            return None
+            
     except Exception as e:
         logging.exception(f"Error in remux_with_metadata: {e}")
         return None
