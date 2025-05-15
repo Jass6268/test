@@ -7,7 +7,8 @@ import zipfile
 import rarfile
 import time
 import logging
-from urllib.parse import urlparse
+import re
+from urllib.parse import urlparse, unquote
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -18,55 +19,136 @@ logging.basicConfig(
 
 GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
 
+def clean_filename(filename):
+    """
+    Clean up filenames by replacing dots with spaces, except for the file extension.
+    Example: thor.2011.full.movie.mkv -> thor 2011 full movie.mkv
+    """
+    # Get file extension
+    name, ext = os.path.splitext(filename)
+    
+    # Replace dots with spaces in the name part only
+    cleaned_name = name.replace('.', ' ')
+    
+    # Rejoin with the extension
+    return cleaned_name + ext
+
 async def get_filename_from_url(session, url):
     try:
+        # Try to get filename from Content-Disposition header
         async with session.head(url, allow_redirects=True) as resp:
             cd = resp.headers.get("Content-Disposition")
             if cd and "filename=" in cd:
                 filename = cd.split("filename=")[1].strip("\"")
-                return filename
+                return clean_filename(unquote(filename))
+                
         async with session.get(url, allow_redirects=True) as resp:
             cd = resp.headers.get("Content-Disposition")
             if cd and "filename=" in cd:
                 filename = cd.split("filename=")[1].strip("\"")
-                return filename
+                return clean_filename(unquote(filename))
     except:
         pass
+    
+    # If headers don't work, try to extract from URL
     parsed = urlparse(url)
-    return os.path.basename(parsed.path) or "file.mp4"
+    url_filename = os.path.basename(parsed.path)
+    url_filename = unquote(url_filename)  # URL decode the filename
+    
+    if url_filename:
+        return clean_filename(url_filename)
+    else:
+        return "file.mp4"  # Default filename
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     try:
-        async with aiohttp.ClientSession() as session:
+        # Optimized connection settings for high-speed transfers
+        conn = aiohttp.TCPConnector(limit=10, force_close=False, enable_cleanup_closed=True)
+        async with aiohttp.ClientSession(
+            connector=conn, 
+            timeout=aiohttp.ClientTimeout(total=None)
+        ) as session:
             async with session.get(url) as resp:
                 total = int(resp.headers.get('content-length', 0))
                 downloaded = 0
-                chunk_size = 4 * 1024 * 1024
+                # Larger chunk size for high-speed connection (8MB)
+                chunk_size = 8 * 1024 * 1024
                 start_time = time.time()
                 last_update_time = time.time()
+                last_activity_time = time.time()
+                
                 with open(dest_path, 'wb') as f:
                     async for chunk in resp.content.iter_chunked(chunk_size):
                         f.write(chunk)
-                        f.flush()
-                        os.fsync(f.fileno())
+                        # Only flush periodically to improve write performance
+                        if downloaded % (32 * 1024 * 1024) == 0:  # Every 32MB
+                            f.flush()
+                            os.fsync(f.fileno())
+                        
                         downloaded += len(chunk)
                         current_time = time.time()
-                        elapsed_time = current_time - start_time
-                        speed = downloaded / 1024 / 1024 / elapsed_time
+                        last_activity_time = current_time
+                        
+                        # Update progress every 5 seconds
                         if current_time - last_update_time >= 5:
-                            percent = (downloaded / total) * 100
+                            elapsed_time = current_time - start_time
+                            speed = downloaded / 1024 / 1024 / elapsed_time if elapsed_time > 0 else 0
+                            percent = (downloaded / total) * 100 if total > 0 else 0
+                            
                             try:
                                 await context.bot.edit_message_text(
                                     chat_id=chat_id,
                                     message_id=message.message_id,
-                                    text=f"📥 Downloading...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
+                                    text=f"📥 Downloading at high speed...\nProgress: {downloaded//1024//1024}MB / {total//1024//1024}MB ({percent:.2f}%)\nSpeed: {speed:.2f} MB/s"
+                                )
+                            except Exception as e:
+                                logging.warning(f"Could not update message: {e}")
+                            
+                            last_update_time = current_time
+                        
+                        # Keep-alive messages every 30 seconds if no data received
+                        if current_time - last_activity_time > 30:
+                            try:
+                                await context.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=message.message_id,
+                                    text=f"📥 High-speed download in progress...\nStill working... Please wait."
                                 )
                             except Exception:
                                 pass
-                            last_update_time = current_time
+                            last_activity_time = current_time
+                
+                # Final flush to ensure all data is written
+                f.flush()
+                os.fsync(f.fileno())
+                
         return dest_path
+    except asyncio.TimeoutError:
+        logging.error("Download timed out")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message.message_id,
+            text="⚠️ Download timed out. Please try again with a different source."
+        )
+        raise
+    except aiohttp.ClientError as e:
+        logging.exception(f"Connection error during download: {e}")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message.message_id,
+            text=f"⚠️ Connection error: {e}"
+        )
+        raise
     except Exception as e:
-        logging.exception("Error during download:")
+        logging.exception(f"Error during download: {e}")
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message.message_id,
+                text=f"❌ Download error: {e}"
+            )
+        except:
+            pass
         raise e
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,7 +219,9 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for root, dirs, files in os.walk(extract_path):
             for file in files:
                 src = os.path.join(root, file)
-                dst = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
+                # Clean the filename when extracting
+                cleaned_file = clean_filename(file)
+                dst = os.path.join(GOOGLE_PHOTOS_FOLDER, cleaned_file)
                 await loop.run_in_executor(None, lambda s=src, d=dst: shutil.copy(s, d))
                 await loop.run_in_executor(None, lambda d=dst: os.system(f"termux-media-scan '{d}'"))
                 uploaded_files += 1
@@ -172,6 +256,12 @@ async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         url = update.message.text.strip()
+        
+        # Validate URL
+        if not url.startswith(('http://', 'https://')):
+            await update.message.reply_text("❌ Please provide a valid URL starting with http:// or https://")
+            return
+            
         async with aiohttp.ClientSession() as session:
             filename = await get_filename_from_url(session, url)
 
