@@ -118,9 +118,10 @@ async def download_with_progress(url, dest_path, message, context, chat_id):
                                 pass
                             last_activity_time = current_time
                 
-                # Final flush to ensure all data is written
-                f.flush()
-                os.fsync(f.fileno())
+                    # Final flush to ensure all data is written
+                    # Do it INSIDE the 'with' block before the file is closed
+                    f.flush()
+                    os.fsync(f.fileno())
                 
         return dest_path
     except asyncio.TimeoutError:
