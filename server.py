@@ -1,93 +1,169 @@
+#!/usr/bin/env python3
+"""
+Bliss OS Auto Upload Script
+--------------------------
+Monitors DCIM/camera folder for new MKV files
+Uploads them to Google Photos
+Sends share link via Telegram bot
+"""
+
 import os
-import subprocess
+import time
+import json
 import requests
-from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify
+import logging
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-app = Flask(__name__)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-# BlissOS Google Photos sync folder
-PHOTOS_SYNC_FOLDER = "/mnt/shared/DCIM/Camera"  # Change this path if your BlissOS sync folder is different
+# Configuration
+DCIM_FOLDER = "/sdcard/DCIM/Camera/"  # Replace with your actual path
+SCOPES = ['https://www.googleapis.com/auth/photoslibrary']
+TOKEN_FILE = 'token.json'
+CREDENTIALS_FILE = 'credentials.json'
+TELEGRAM_BOT_TOKEN = "8114381417:AAFlvW0cQBhv4LTi1m8pmMuR-zC_zl0MWpo"  # Replace with your bot token
+TELEGRAM_CHAT_ID = "6575149109"  # Replace with your chat ID
 
-# ================================
-# 1. /upload → Download and move file
-# ================================
-@app.route('/upload', methods=['POST'])
-def upload():
-    data = request.get_json()
-    drive_url = data.get('url')
-    filename = data.get('name')
+class MkvHandler(FileSystemEventHandler):
+    """Handler for MKV file events in the DCIM folder"""
 
-    if not drive_url or not filename:
-        return jsonify({'status': 'error', 'message': 'Missing url or filename'}), 400
+    def __init__(self):
+        super().__init__()
+        self.google_photos_service = self._authenticate_google_photos()
+        logger.info("Google Photos authentication successful")
 
-    filename = filename.strip().replace(" ", "_")
-    tmp_path = f"/tmp/{filename}"
+    def on_created(self, event):
+        """Handle file creation events"""
+        if not event.is_directory and event.src_path.lower().endswith('.mkv'):
+            logger.info(f"New MKV file detected: {event.src_path}")
+            # Allow a small delay to ensure file is completely written
+            time.sleep(3)
+            self._upload_to_google_photos(event.src_path)
 
-    # Download using aria2c
-    subprocess.run(["aria2c", "-o", filename, drive_url], cwd="/tmp", check=True)
+    def _authenticate_google_photos(self):
+        """Authenticate with Google Photos API"""
+        creds = None
+        
+        # Check if token file exists
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_info(
+                json.loads(open(TOKEN_FILE).read()), SCOPES)
+        
+        # If credentials don't exist or are invalid, get new ones
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    CREDENTIALS_FILE, SCOPES)
+                creds = flow.run_local_server(port=0)
+            
+            # Save credentials for next run
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
+        
+        # Build the Google Photos service
+        return build('photoslibrary', 'v1', credentials=creds, static_discovery=False)
 
-    # Move to Google Photos folder
-    final_path = os.path.join(PHOTOS_SYNC_FOLDER, filename)
-    os.rename(tmp_path, final_path)
+    def _upload_to_google_photos(self, file_path):
+        """Upload file to Google Photos and send share link via Telegram"""
+        try:
+            # 1. Upload the media item
+            logger.info(f"Uploading {file_path} to Google Photos...")
+            
+            # First, get an upload token
+            filename = os.path.basename(file_path)
+            mime_type = 'video/x-matroska'
+            
+            upload_url = 'https://photoslibrary.googleapis.com/v1/uploads'
+            headers = {
+                'Authorization': f'Bearer {self.google_photos_service._credentials.token}',
+                'Content-Type': 'application/octet-stream',
+                'X-Goog-Upload-File-Name': filename,
+                'X-Goog-Upload-Protocol': 'raw',
+            }
+            
+            with open(file_path, 'rb') as file_data:
+                upload_token = requests.post(upload_url, headers=headers, data=file_data).text
+            
+            # 2. Create the media item in Google Photos
+            body = {
+                'newMediaItems': [{
+                    'description': f'Uploaded from Bliss OS: {filename}',
+                    'simpleMediaItem': {
+                        'uploadToken': upload_token
+                    }
+                }]
+            }
+            
+            response = self.google_photos_service.mediaItems().batchCreate(body=body).execute()
+            
+            if 'newMediaItemResults' in response:
+                item = response['newMediaItemResults'][0]['mediaItem']
+                media_id = item['id']
+                product_url = item['productUrl']
+                
+                logger.info(f"Upload successful! Media ID: {media_id}")
+                logger.info(f"Share link: {product_url}")
+                
+                # 3. Send share link via Telegram with file name
+                self._send_telegram_message(f"New video uploaded to Google Photos!\nFile: {filename}\nLink: {product_url}")
+            else:
+                logger.error("Upload failed: Response didn't contain expected format")
+                logger.error(f"Response: {response}")
+        
+        except Exception as e:
+            logger.error(f"Error uploading to Google Photos: {str(e)}")
+    
+    def _send_telegram_message(self, message):
+        """Send message via Telegram bot"""
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            }
+            response = requests.post(url, data=data)
+            
+            if response.status_code == 200:
+                logger.info("Telegram notification sent successfully")
+            else:
+                logger.error(f"Failed to send Telegram notification: {response.text}")
+        
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {str(e)}")
 
-    return jsonify({'status': 'success', 'filename': filename})
+def main():
+    """Main function to start the observer"""
+    logger.info(f"Starting to monitor folder: {DCIM_FOLDER}")
+    
+    # Create observer and handler
+    event_handler = MkvHandler()
+    observer = Observer()
+    
+    # Schedule the observer
+    observer.schedule(event_handler, DCIM_FOLDER, recursive=False)
+    observer.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    
+    observer.join()
 
-
-# ================================
-# 2. /save_link → Save Google Photos link to Cloudflare KV
-# ================================
-CLOUDFLARE_KV_WRITE_API = "https://api.cloudflare.com/client/v4/accounts/fd136511df3e15f09706a22ea2feaddf/storage/kv/namespaces/19830dfab80043d1afd4400f8eb8ccce/values/"
-CLOUDFLARE_AUTH_HEADERS = {
-    "Authorization": "Bearer cozLDCHPbp0jsB7w3ExNvmGU0lcsiT0ctItxfpbX",
-    "Content-Type": "text/plain"
-}
-
-@app.route('/save_link', methods=['POST'])
-def save_link():
-    data = request.get_json()
-    link_id = data.get('id')
-    share_link = data.get('link')
-
-    if not link_id or not share_link:
-        return jsonify({'status': 'error', 'message': 'Missing data'}), 400
-
-    # Save link to Cloudflare KV
-    resp = requests.put(
-        CLOUDFLARE_KV_WRITE_API + link_id,
-        headers=CLOUDFLARE_AUTH_HEADERS,
-        data=share_link
-    )
-
-    if resp.status_code == 200:
-        return jsonify({'status': 'saved'})
-    else:
-        return jsonify({'status': 'error', 'message': resp.text}), 500
-
-
-# ================================
-# 3. /extract → Get direct video-download link from shared Photos URL
-# ================================
-@app.route('/extract')
-def extract():
-    share_url = request.args.get("url")
-    if not share_url:
-        return jsonify({"error": "Missing url"}), 400
-
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    res = requests.get(share_url, headers=headers)
-
-    soup = BeautifulSoup(res.text, 'html.parser')
-    video_tag = soup.find("video")
-
-    if not video_tag or not video_tag.get("src"):
-        return jsonify({"error": "Direct link not found"}), 404
-
-    return jsonify({"direct_url": video_tag["src"]})
-
-
-# ================================
-# Flask run
-# ================================
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    main()
