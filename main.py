@@ -12,6 +12,9 @@ import time
 import json
 import requests
 import logging
+import webbrowser
+import subprocess
+import platform
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from google.oauth2.credentials import Credentials
@@ -52,6 +55,44 @@ class MkvHandler(FileSystemEventHandler):
             time.sleep(3)
             self._upload_to_google_photos(event.src_path)
 
+    def _open_browser(self, url):
+        """Try to open URL in system browser using multiple methods"""
+        try:
+            # Method 1: Python's webbrowser module
+            webbrowser.open(url)
+            return True
+        except Exception as e1:
+            logger.warning(f"webbrowser.open failed: {e1}")
+            
+            try:
+                # Method 2: Platform-specific commands
+                system = platform.system().lower()
+                
+                if system == "linux":
+                    # Try different Linux browsers
+                    browsers = ['xdg-open', 'google-chrome', 'firefox', 'chromium-browser', 'opera']
+                    for browser in browsers:
+                        try:
+                            subprocess.run([browser, url], check=True, 
+                                         stdout=subprocess.DEVNULL, 
+                                         stderr=subprocess.DEVNULL)
+                            return True
+                        except (subprocess.CalledProcessError, FileNotFoundError):
+                            continue
+                
+                elif system == "darwin":  # macOS
+                    subprocess.run(['open', url], check=True)
+                    return True
+                    
+                elif system == "windows":
+                    subprocess.run(['start', url], shell=True, check=True)
+                    return True
+                
+            except Exception as e2:
+                logger.warning(f"Platform-specific browser opening failed: {e2}")
+        
+        return False
+
     def _authenticate_google_photos(self):
         """Authenticate with Google Photos API"""
         creds = None
@@ -66,31 +107,59 @@ class MkvHandler(FileSystemEventHandler):
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CREDENTIALS_FILE, SCOPES)
-                
-                # For headless servers - don't try to open browser automatically
-                flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
-                
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                
-                print("\n" + "="*60)
-                print("GOOGLE AUTHENTICATION REQUIRED")
-                print("="*60)
-                print("1. Copy this URL and open it in a browser:")
-                print(f"\n{auth_url}\n")
-                print("2. Complete the authorization in your browser")
-                print("3. Copy the authorization code from the browser")
-                print("4. Paste it below:")
-                print("="*60)
-                
-                code = input("Enter authorization code: ").strip()
-                flow.fetch_token(code=code)
-                creds = flow.credentials
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        CREDENTIALS_FILE, SCOPES)
+                    
+                    # Generate authorization URL
+                    auth_url, _ = flow.authorization_url(
+                        access_type='offline',
+                        include_granted_scopes='true'
+                    )
+                    
+                    print("\n" + "="*60)
+                    print("GOOGLE AUTHENTICATION REQUIRED")
+                    print("="*60)
+                    print("Attempting to open browser automatically...")
+                    
+                    # Try to open browser automatically
+                    browser_opened = self._open_browser(auth_url)
+                    
+                    if browser_opened:
+                        print("✓ Browser opened successfully!")
+                        print("Complete the authorization in your browser, then return here.")
+                    else:
+                        print("✗ Could not open browser automatically.")
+                        print("Please manually copy and open this URL:")
+                        print(f"\n{auth_url}\n")
+                    
+                    print("\nAfter authorization:")
+                    print("1. Complete the authorization in your browser")
+                    print("2. Copy the authorization code from the browser")
+                    print("3. Paste it below:")
+                    print("="*60)
+                    
+                    code = input("Enter authorization code: ").strip()
+                    
+                    # Clean the code (remove any extra whitespace or characters)
+                    code = code.replace(' ', '').replace('\n', '').replace('\r', '')
+                    
+                    if not code:
+                        raise ValueError("No authorization code provided")
+                    
+                    flow.fetch_token(code=code)
+                    creds = flow.credentials
+                    
+                except Exception as e:
+                    logger.error(f"Authentication failed: {str(e)}")
+                    logger.error("Please check your credentials.json file and try again")
+                    raise
             
             # Save credentials for next run
             with open(TOKEN_FILE, 'w') as token:
                 token.write(creds.to_json())
+            
+            logger.info("Authentication successful!")
         
         # Build the Google Photos service
         return build('photoslibrary', 'v1', credentials=creds, static_discovery=False)
