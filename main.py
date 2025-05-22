@@ -433,12 +433,14 @@ Use /status to check queue status"""
             return False
 
     def _get_share_link(self, filename):
-        """Get shareable Google Photos link (photos.app.goo.gl format)"""
+        """Get shareable Google Photos link (photos.app.goo.gl format) - FIXED VERSION"""
         if not self.google_photos_service:
             return "Google Photos link not available"
         
         try:
-            # Search for the file to get its media item
+            logger.info(f"Creating shareable link for: {filename}")
+            
+            # Step 1: Search for the uploaded file
             results = self.google_photos_service.mediaItems().list(
                 pageSize=50
             ).execute()
@@ -446,72 +448,162 @@ Use /status to check queue status"""
             media_items = results.get('mediaItems', [])
             target_item = None
             
+            logger.info(f"Found {len(media_items)} recent media items")
+            
+            # Find the matching file
             for item in media_items:
                 item_filename = item.get('filename', '')
-                if filename.lower() in item_filename.lower() or item_filename.lower() in filename.lower():
+                item_id = item.get('id', '')
+                
+                if (filename.lower() in item_filename.lower() or 
+                    item_filename.lower() in filename.lower()):
                     target_item = item
+                    logger.info(f"Found matching item: {item_filename} (ID: {item_id[:20]}...)")
                     break
             
             if not target_item:
+                logger.error(f"File {filename} not found in Google Photos")
                 return "File not found in Google Photos"
             
             media_item_id = target_item.get('id')
             if not media_item_id:
+                logger.error("Media item ID not available")
                 return "Media item ID not available"
             
-            # Create a shared album with this media item to get shareable link
-            album_title = f"Shared_{filename}_{int(time.time())}"
+            # Step 2: Create a shared album (FIXED METHOD)
+            album_title = f"Auto_Share_{int(time.time())}"  # Shorter, cleaner name
             
-            # Step 1: Create a shared album
+            logger.info(f"Creating shared album: {album_title}")
+            
             album_body = {
                 'album': {
                     'title': album_title
                 }
             }
             
-            album_response = self.google_photos_service.albums().create(body=album_body).execute()
-            album_id = album_response.get('id')
+            try:
+                album_response = self.google_photos_service.albums().create(body=album_body).execute()
+                album_id = album_response.get('id')
+                
+                if not album_id:
+                    raise Exception("Album creation returned no ID")
+                
+                logger.info(f"Album created successfully: {album_id[:20]}...")
+                
+            except Exception as album_error:
+                logger.error(f"Album creation failed: {album_error}")
+                return self._fallback_share_method(target_item, filename)
             
-            if not album_id:
-                return "Failed to create shared album"
+            # Step 3: Add media item to the album (FIXED METHOD)
+            logger.info("Adding media item to album...")
             
-            # Step 2: Add media item to the album
-            add_media_body = {
-                'mediaItemIds': [media_item_id]
-            }
-            
-            self.google_photos_service.albums().batchAddMediaItems(
-                albumId=album_id,
-                body=add_media_body
-            ).execute()
-            
-            # Step 3: Share the album to get the shareable link
-            share_body = {
-                'sharedAlbumOptions': {
-                    'isCollaborative': False,
-                    'isCommentable': False
+            try:
+                add_media_body = {
+                    'mediaItemIds': [media_item_id]
                 }
-            }
+                
+                add_response = self.google_photos_service.albums().batchAddMediaItems(
+                    albumId=album_id,
+                    body=add_media_body
+                ).execute()
+                
+                # Check if adding was successful
+                if 'newMediaItemResults' in add_response:
+                    results = add_response['newMediaItemResults']
+                    if results and results[0].get('status', {}).get('message') == 'Success':
+                        logger.info("Media item added to album successfully")
+                    else:
+                        raise Exception(f"Add media failed: {results}")
+                else:
+                    logger.info("Media item added (no explicit success confirmation)")
+                
+            except Exception as add_error:
+                logger.error(f"Adding media to album failed: {add_error}")
+                # Try to delete the album we created
+                try:
+                    self.google_photos_service.albums().delete(albumId=album_id).execute()
+                except:
+                    pass
+                return self._fallback_share_method(target_item, filename)
             
-            share_response = self.google_photos_service.albums().share(
-                albumId=album_id,
-                body=share_body
-            ).execute()
+            # Step 4: Share the album to get shareable link (FIXED METHOD)
+            logger.info("Creating shareable link from album...")
             
-            share_info = share_response.get('shareInfo', {})
-            shareable_url = share_info.get('shareableUrl', '')
-            
-            if shareable_url:
-                logger.info(f"Created shareable link: {shareable_url}")
-                return shareable_url
-            else:
-                # Fallback to product URL if sharing fails
-                return target_item.get('productUrl', 'Share link creation failed')
+            try:
+                share_body = {
+                    'sharedAlbumOptions': {
+                        'isCollaborative': False,
+                        'isCommentable': False
+                    }
+                }
+                
+                share_response = self.google_photos_service.albums().share(
+                    albumId=album_id,
+                    body=share_body
+                ).execute()
+                
+                share_info = share_response.get('shareInfo', {})
+                shareable_url = share_info.get('shareableUrl', '')
+                share_token = share_info.get('shareToken', '')
+                
+                if shareable_url and 'photos.app.goo.gl' in shareable_url:
+                    logger.info(f"✅ SUCCESS: Created photos.app.goo.gl link: {shareable_url}")
+                    return shareable_url
+                elif shareable_url:
+                    logger.info(f"✅ SUCCESS: Created shareable link: {shareable_url}")
+                    return shareable_url
+                else:
+                    raise Exception(f"No shareable URL in response: {share_response}")
+                
+            except Exception as share_error:
+                logger.error(f"Album sharing failed: {share_error}")
+                # Try to delete the album we created
+                try:
+                    self.google_photos_service.albums().delete(albumId=album_id).execute()
+                except:
+                    pass
+                return self._fallback_share_method(target_item, filename)
             
         except Exception as e:
-            logger.error(f"Error creating share link: {e}")
-            # Try alternative method - direct sharing
-            return self._get_alternative_share_link(filename)
+            logger.error(f"Error in _get_share_link: {str(e)}")
+            return f"Share link creation failed: {str(e)}"
+
+    def _fallback_share_method(self, target_item, filename):
+        """Fallback method when album sharing fails"""
+        logger.info("Trying fallback share methods...")
+        
+        try:
+            # Method 1: Try to get existing shared albums containing this item
+            albums_response = self.google_photos_service.sharedAlbums().list(
+                pageSize=50
+            ).execute()
+            
+            shared_albums = albums_response.get('sharedAlbums', [])
+            
+            for album in shared_albums:
+                share_info = album.get('shareInfo', {})
+                shareable_url = share_info.get('shareableUrl', '')
+                if shareable_url and 'photos.app.goo.gl' in shareable_url:
+                    logger.info(f"Found existing shared album link: {shareable_url}")
+                    return shareable_url
+            
+            # Method 2: Return product URL with warning
+            product_url = target_item.get('productUrl', '')
+            if product_url:
+                logger.warning(f"Using productUrl as fallback: {product_url}")
+                return f"⚠️ Temporary link (not permanent): {product_url}"
+            
+            # Method 3: Last resort - base URL with warning
+            base_url = target_item.get('baseUrl', '')
+            if base_url:
+                logger.warning(f"Using baseUrl as last resort: {base_url[:50]}...")
+                return f"❌ TEMPORARY LINK - Will expire soon!"
+            
+            return "❌ Could not create any shareable link"
+            
+        except Exception as e:
+            logger.error(f"Fallback share method failed: {e}")
+            return f"❌ All share methods failed: {str(e)}"
 
     def _open_google_photos(self):
         """Open Google Photos app"""
@@ -534,22 +626,41 @@ Use /status to check queue status"""
                 logger.error(f"Failed to open Google Photos: {e}")
 
     def _send_telegram_notification(self, filename, file_size, share_link):
-        """Send Telegram notification with file info and link"""
+        """Send Telegram notification with file info and link - ENHANCED"""
         try:
-            message = f"""📱 New video uploaded to Google Photos!
+            # Check if we got a proper photos.app.goo.gl link
+            if 'photos.app.goo.gl' in share_link:
+                link_status = "✅ Permanent shareable link"
+                link_emoji = "🔗"
+            elif 'googleusercontent.com' in share_link:
+                link_status = "⚠️ Temporary link (will expire)"
+                link_emoji = "⏰"
+            elif 'TEMPORARY' in share_link or 'expire' in share_link.lower():
+                link_status = "❌ Temporary link (not permanent)"
+                link_emoji = "⚠️"
+            else:
+                link_status = "✅ Shareable link"
+                link_emoji = "🔗"
 
-📁 File: {filename}
-📊 Size: {file_size / (1024*1024):.1f}MB
-🔗 Link: {share_link}
+            message = f"""📱 **New video uploaded to Google Photos!**
 
-✅ Processed automatically from Bliss OS"""
+📁 **File:** {filename}
+📊 **Size:** {file_size / (1024*1024):.1f}MB
+{link_emoji} **Link:** {share_link}
+
+{link_status}
+✅ **Processed automatically from Bliss OS**"""
 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID, 
+                "text": message,
+                "parse_mode": "Markdown"
+            }
             response = requests.post(url, data=data, timeout=10)
             
             if response.status_code == 200:
-                logger.info("Telegram notification sent")
+                logger.info(f"✅ Telegram notification sent with {link_status}")
             else:
                 logger.error(f"Telegram error: {response.text}")
         except Exception as e:
