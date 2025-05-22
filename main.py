@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Bliss OS Native Google Photos Auto Sync Script
-----------------------------------------------
+Simple Google Photos Upload Checker
+-----------------------------------
 1. Detects new MKV files in Camera folder
 2. Opens Google Photos app for auto-sync
-3. Waits for upload completion
-4. Gets share link via Telegram bot
-5. Force stops Google Photos app (root)
-6. Deletes file from Camera folder
-7. Processes next file one by one
+3. Checks every 10 seconds if file uploaded to Google Photos
+4. When uploaded: sends Telegram link, force stops app, deletes file
+5. Processes next file
 """
 
 import os
@@ -20,6 +18,9 @@ import subprocess
 import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
 # Set up logging
 logging.basicConfig(
@@ -30,17 +31,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-CAMERA_FOLDER = "/storage/emulated/0/DCIM/Camera"  # Bliss OS camera folder
+CAMERA_FOLDER = "/sdcard/DCIM/Camera/"  # Bliss OS camera folder
 TELEGRAM_BOT_TOKEN = "8114381417:AAFlvW0cQBhv4LTi1m8pmMuR-zC_zl0MWpo"  # Replace with your bot token
 TELEGRAM_CHAT_ID = "6575149109"  # Replace with your chat ID
 GOOGLE_PHOTOS_PACKAGE = "com.google.android.apps.photos"
+CHECK_INTERVAL = 10  # Check upload status every 10 seconds
+MAX_CHECK_TIME = 3600  # Maximum check time: 1 hour
 
-# Upload speed configuration
-UPLOAD_SPEED_MBPS = 15  # Your VPS upload speed in MB/s
-BASE_WAIT_TIME = 60  # Minimum wait time in seconds
-SPEED_BUFFER_MULTIPLIER = 1.5  # Add 50% buffer time for safety
-MAX_WAIT_TIME = 3600  # Maximum wait time: 1 hour
-SYNC_CHECK_INTERVAL = 10  # Check sync status every 10 seconds
+# Google Photos API (using your existing token)
+SCOPES = ['https://www.googleapis.com/auth/photoslibrary']
+TOKEN_FILE = 'token.json'
+CREDENTIALS_FILE = 'credentials.json'
 
 class FileQueue:
     """Thread-safe queue for processing files one by one"""
@@ -69,15 +70,39 @@ class FileQueue:
         with self.lock:
             return self.processing
 
-class BlissOSHandler(FileSystemEventHandler):
-    """Handler for MKV file events in Camera folder"""
+class SimpleUploadChecker(FileSystemEventHandler):
+    """Simple handler that checks upload status every 10 seconds"""
 
     def __init__(self):
         super().__init__()
         self.file_queue = FileQueue()
+        self.google_photos_service = self._setup_google_photos()
         self.processor_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.processor_thread.start()
-        logger.info("Bliss OS Google Photos sync handler initialized")
+        logger.info("Simple upload checker initialized")
+
+    def _setup_google_photos(self):
+        """Set up Google Photos API service"""
+        try:
+            creds = None
+            if os.path.exists(TOKEN_FILE):
+                with open(TOKEN_FILE, 'r') as token:
+                    creds = Credentials.from_authorized_user_info(
+                        json.loads(token.read()), SCOPES)
+            
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
+            
+            if creds and creds.valid:
+                return build('photoslibrary', 'v1', credentials=creds, static_discovery=False)
+            else:
+                logger.warning("No valid Google Photos credentials found")
+                return None
+        except Exception as e:
+            logger.error(f"Error setting up Google Photos API: {e}")
+            return None
 
     def on_created(self, event):
         """Handle file creation events"""
@@ -103,36 +128,10 @@ class BlissOSHandler(FileSystemEventHandler):
                         self.file_queue.set_processing(False)
             time.sleep(2)
 
-    def _calculate_upload_time(self, file_path):
-        """Calculate expected upload time based on file size and connection speed"""
-        try:
-            file_size_bytes = os.path.getsize(file_path)
-            file_size_mb = file_size_bytes / (1024 * 1024)  # Convert to MB
-            
-            # Calculate base upload time
-            upload_time_seconds = file_size_mb / UPLOAD_SPEED_MBPS
-            
-            # Add buffer time for safety
-            total_wait_time = int(upload_time_seconds * SPEED_BUFFER_MULTIPLIER)
-            
-            # Apply minimum and maximum limits
-            total_wait_time = max(BASE_WAIT_TIME, total_wait_time)
-            total_wait_time = min(MAX_WAIT_TIME, total_wait_time)
-            
-            logger.info(f"File size: {file_size_mb:.1f}MB")
-            logger.info(f"Estimated upload time: {upload_time_seconds:.0f}s ({upload_time_seconds/60:.1f}m)")
-            logger.info(f"Total wait time (with buffer): {total_wait_time}s ({total_wait_time/60:.1f}m)")
-            
-            return total_wait_time
-            
-        except Exception as e:
-            logger.error(f"Error calculating upload time: {e}")
-            return BASE_WAIT_TIME
-
     def _process_file(self, file_path):
-        """Process a single file through the complete workflow"""
+        """Process a single file: open app → check every 10s → actions when uploaded"""
         filename = os.path.basename(file_path)
-        logger.info(f"Starting processing: {filename}")
+        logger.info(f"Processing: {filename}")
         
         try:
             # Step 1: Check if file still exists
@@ -140,64 +139,157 @@ class BlissOSHandler(FileSystemEventHandler):
                 logger.warning(f"File no longer exists: {filename}")
                 return
             
-            # Step 2: Calculate dynamic wait time based on file size
-            upload_wait_time = self._calculate_upload_time(file_path)
+            file_size = os.path.getsize(file_path)
+            logger.info(f"File size: {file_size / (1024*1024):.1f}MB")
             
-            # Step 3: Open Google Photos app
+            # Step 2: Open Google Photos app
             logger.info("Opening Google Photos app...")
             self._open_google_photos()
-            
-            # Step 4: Wait for app to start and begin sync
             time.sleep(15)  # Give app time to start
             
-            # Step 5: Wait for upload completion with dynamic timing
-            logger.info(f"Waiting for {filename} to upload to Google Photos...")
-            logger.info(f"Expected wait time: {upload_wait_time/60:.1f} minutes")
+            # Step 3: Check every 10 seconds if file is uploaded
+            logger.info(f"Checking every {CHECK_INTERVAL} seconds if {filename} is uploaded...")
             
-            if self._wait_for_upload_completion(file_path, upload_wait_time):
-                logger.info(f"Upload completed for {filename}")
+            upload_found = False
+            total_check_time = 0
+            
+            while total_check_time < MAX_CHECK_TIME:
+                time.sleep(CHECK_INTERVAL)
+                total_check_time += CHECK_INTERVAL
                 
-                # Step 6: Get file info for sharing
-                file_info = self._get_file_info(file_path)
+                logger.info(f"Checking upload status... ({total_check_time}s elapsed)")
                 
-                # Step 7: Send notification via Telegram
-                self._send_telegram_notification(filename, file_info)
+                # Check if file is uploaded to Google Photos
+                if self._check_file_uploaded(filename, file_size):
+                    logger.info(f"✅ {filename} found uploaded to Google Photos!")
+                    upload_found = True
+                    break
+            
+            if upload_found:
+                # Step 4: Get share link and send Telegram
+                share_link = self._get_share_link(filename)
+                self._send_telegram_notification(filename, file_size, share_link)
                 
-                # Step 8: Force stop Google Photos app
+                # Step 5: Force stop Google Photos app
                 logger.info("Force stopping Google Photos app...")
                 self._force_stop_google_photos()
                 
-                # Step 9: Delete file from Camera folder
+                # Step 6: Delete file from Camera folder
                 logger.info(f"Deleting {filename} from Camera folder...")
                 self._delete_file(file_path)
                 
-                logger.info(f"Successfully processed and deleted: {filename}")
-                
+                logger.info(f"✅ Successfully processed: {filename}")
             else:
-                logger.warning(f"Upload timeout for {filename}, skipping deletion")
+                logger.warning(f"⏰ Timeout: {filename} not uploaded after {MAX_CHECK_TIME}s")
                 self._force_stop_google_photos()
                 
         except Exception as e:
-            logger.error(f"Error in _process_file for {filename}: {str(e)}")
-            # Force stop Google Photos even if there's an error
+            logger.error(f"Error processing {filename}: {str(e)}")
             try:
                 self._force_stop_google_photos()
             except:
                 pass
 
-    def _open_google_photos(self):
-        """Open Google Photos app using Android activity manager"""
+    def _check_file_uploaded(self, filename, file_size):
+        """Check if file is uploaded to Google Photos"""
+        if not self.google_photos_service:
+            logger.warning("No Google Photos service available")
+            return False
+        
         try:
-            # Method 1: Open Google Photos directly
+            # Search for recent media items
+            results = self.google_photos_service.mediaItems().list(
+                pageSize=50
+            ).execute()
+            
+            media_items = results.get('mediaItems', [])
+            
+            for item in media_items:
+                # Check if filename matches (Google Photos might change the name)
+                item_filename = item.get('filename', '')
+                
+                # Check multiple conditions for a match
+                if (filename.lower() in item_filename.lower() or 
+                    item_filename.lower() in filename.lower() or
+                    self._compare_file_properties(item, file_size)):
+                    
+                    logger.info(f"Found matching file: {item_filename}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking upload status: {e}")
+            return False
+
+    def _compare_file_properties(self, item, original_size):
+        """Compare file properties to identify uploaded file"""
+        try:
+            # Check file type
+            mime_type = item.get('mimeType', '')
+            if 'video' not in mime_type.lower():
+                return False
+            
+            # Check approximate file size (within 10% tolerance)
+            metadata = item.get('mediaMetadata', {})
+            width = metadata.get('width', 0)
+            height = metadata.get('height', 0)
+            
+            # If it's a recent video file, consider it a match
+            # (Google Photos API doesn't always provide exact file size)
+            creation_time = metadata.get('creationTime', '')
+            if creation_time:
+                # Check if created recently (within last hour)
+                from datetime import datetime, timezone
+                import dateutil.parser
+                
+                created = dateutil.parser.parse(creation_time)
+                now = datetime.now(timezone.utc)
+                time_diff = (now - created).total_seconds()
+                
+                if time_diff < 3600:  # Within last hour
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error comparing file properties: {e}")
+            return False
+
+    def _get_share_link(self, filename):
+        """Get shareable link for uploaded file"""
+        if not self.google_photos_service:
+            return "Google Photos link not available"
+        
+        try:
+            # Search for the file again to get its ID
+            results = self.google_photos_service.mediaItems().list(
+                pageSize=50
+            ).execute()
+            
+            media_items = results.get('mediaItems', [])
+            
+            for item in media_items:
+                item_filename = item.get('filename', '')
+                if filename.lower() in item_filename.lower() or item_filename.lower() in filename.lower():
+                    return item.get('productUrl', 'Share link not available')
+            
+            return "File found but share link not available"
+            
+        except Exception as e:
+            logger.error(f"Error getting share link: {e}")
+            return "Error getting share link"
+
+    def _open_google_photos(self):
+        """Open Google Photos app"""
+        try:
             subprocess.run([
                 'am', 'start',
                 '-n', f'{GOOGLE_PHOTOS_PACKAGE}/.home.HomeActivity'
             ], check=True, capture_output=True)
-            logger.info("Google Photos app opened successfully")
-            
+            logger.info("Google Photos app opened")
         except subprocess.CalledProcessError:
             try:
-                # Method 2: Open via intent
                 subprocess.run([
                     'am', 'start',
                     '-a', 'android.intent.action.MAIN',
@@ -205,171 +297,75 @@ class BlissOSHandler(FileSystemEventHandler):
                     GOOGLE_PHOTOS_PACKAGE
                 ], check=True, capture_output=True)
                 logger.info("Google Photos app opened via intent")
-                
             except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to open Google Photos app: {e}")
-                raise
+                logger.error(f"Failed to open Google Photos: {e}")
 
-    def _wait_for_upload_completion(self, file_path, max_wait_time):
-        """Wait for file to be uploaded to Google Photos with progress updates"""
-        filename = os.path.basename(file_path)
-        initial_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-        
-        logger.info(f"Monitoring upload progress for {filename}")
-        logger.info(f"File size: {initial_size / (1024*1024):.1f}MB")
-        logger.info(f"Maximum wait time: {max_wait_time/60:.1f} minutes")
-        
-        elapsed_time = 0
-        last_progress_update = 0
-        
-        while elapsed_time < max_wait_time:
-            time.sleep(SYNC_CHECK_INTERVAL)
-            elapsed_time += SYNC_CHECK_INTERVAL
-            
-            # Show progress updates every minute
-            if elapsed_time - last_progress_update >= 60:
-                progress_percent = (elapsed_time / max_wait_time) * 100
-                logger.info(f"Upload progress: {elapsed_time/60:.1f}m elapsed ({progress_percent:.0f}% of expected time)")
-                last_progress_update = elapsed_time
-            
-            # Check if Google Photos is still running and syncing
-            if self._is_google_photos_syncing():
-                continue
-            else:
-                # App finished syncing, assume upload complete
-                logger.info(f"Google Photos sync completed for {filename} after {elapsed_time/60:.1f} minutes")
-                return True
-        
-        logger.warning(f"Upload timeout reached for {filename} after {max_wait_time/60:.1f} minutes")
-        return False
-
-    def _is_google_photos_syncing(self):
-        """Check if Google Photos is currently syncing"""
-        try:
-            # Check if Google Photos process is active
-            result = subprocess.run([
-                'ps', '-A'
-            ], capture_output=True, text=True)
-            
-            # Look for Google Photos in running processes
-            return GOOGLE_PHOTOS_PACKAGE in result.stdout
-            
-        except Exception as e:
-            logger.warning(f"Could not check sync status: {e}")
-            return True  # Assume still syncing if we can't check
-
-    def _get_file_info(self, file_path):
-        """Get file information for sharing"""
-        try:
-            stat = os.stat(file_path)
-            return {
-                'name': os.path.basename(file_path),
-                'size': stat.st_size,
-                'modified': time.ctime(stat.st_mtime)
-            }
-        except Exception as e:
-            logger.error(f"Error getting file info: {e}")
-            return {'name': os.path.basename(file_path), 'size': 0, 'modified': 'unknown'}
-
-    def _send_telegram_notification(self, filename, file_info):
-        """Send notification via Telegram bot"""
+    def _send_telegram_notification(self, filename, file_size, share_link):
+        """Send Telegram notification with file info and link"""
         try:
             message = f"""📱 New video uploaded to Google Photos!
 
 📁 File: {filename}
-📊 Size: {file_info['size']} bytes
-🕒 Modified: {file_info['modified']}
+📊 Size: {file_size / (1024*1024):.1f}MB
+🔗 Link: {share_link}
 
-✅ Automatically synced from Bliss OS Camera folder
-🗑️ Original file deleted from device"""
+✅ Processed automatically from Bliss OS"""
 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message
-            }
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
             response = requests.post(url, data=data, timeout=10)
             
             if response.status_code == 200:
-                logger.info("Telegram notification sent successfully")
+                logger.info("Telegram notification sent")
             else:
-                logger.error(f"Failed to send Telegram notification: {response.text}")
-        
+                logger.error(f"Telegram error: {response.text}")
         except Exception as e:
-            logger.error(f"Error sending Telegram message: {str(e)}")
+            logger.error(f"Error sending Telegram: {e}")
 
     def _force_stop_google_photos(self):
-        """Force stop Google Photos app using root permissions"""
+        """Force stop Google Photos app"""
         try:
-            # Method 1: Use am force-stop (requires root)
-            result = subprocess.run([
+            subprocess.run([
                 'su', '-c', f'am force-stop {GOOGLE_PHOTOS_PACKAGE}'
-            ], capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logger.info("Google Photos app force stopped successfully")
-            else:
-                logger.warning(f"Force stop command returned: {result.stderr}")
-                
-                # Method 2: Kill process directly
-                subprocess.run([
-                    'su', '-c', f'pkill -f {GOOGLE_PHOTOS_PACKAGE}'
-                ], capture_output=True)
-                logger.info("Google Photos process killed via pkill")
-                
+            ], capture_output=True)
+            logger.info("Google Photos app force stopped")
         except Exception as e:
-            logger.error(f"Error force stopping Google Photos: {str(e)}")
+            logger.error(f"Error force stopping: {e}")
 
     def _delete_file(self, file_path):
-        """Permanently delete file from Camera folder"""
+        """Delete file from Camera folder"""
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                logger.info(f"File deleted successfully: {os.path.basename(file_path)}")
-            else:
-                logger.warning(f"File already deleted: {os.path.basename(file_path)}")
+                logger.info(f"File deleted: {os.path.basename(file_path)}")
         except Exception as e:
-            logger.error(f"Error deleting file {file_path}: {str(e)}")
+            logger.error(f"Error deleting file: {e}")
 
 def main():
-    """Main function to start the observer"""
+    """Main function"""
     logger.info("="*60)
-    logger.info("BLISS OS GOOGLE PHOTOS AUTO SYNC")
+    logger.info("SIMPLE GOOGLE PHOTOS UPLOAD CHECKER")
     logger.info("="*60)
-    logger.info(f"Monitoring folder: {CAMERA_FOLDER}")
-    logger.info(f"Google Photos package: {GOOGLE_PHOTOS_PACKAGE}")
-    logger.info("Workflow: Detect → Open App → Sync → Share → Force Stop → Delete")
+    logger.info(f"Monitoring: {CAMERA_FOLDER}")
+    logger.info(f"Check interval: {CHECK_INTERVAL} seconds")
+    logger.info("Workflow: Detect → Open App → Check every 10s → Share → Stop → Delete")
     logger.info("="*60)
     
-    # Check if running as root
-    try:
-        result = subprocess.run(['id'], capture_output=True, text=True)
-        if 'uid=0' in result.stdout:
-            logger.info("✅ Running with root privileges")
-        else:
-            logger.warning("⚠️ Not running as root - some features may not work")
-    except:
-        logger.warning("Could not check root status")
-    
-    # Create observer and handler
-    event_handler = BlissOSHandler()
+    event_handler = SimpleUploadChecker()
     observer = Observer()
-    
-    # Schedule the observer
     observer.schedule(event_handler, CAMERA_FOLDER, recursive=False)
     observer.start()
     
-    logger.info("🚀 Auto-sync monitoring started! Upload MKV files to test...")
+    logger.info("🚀 Simple upload checker started!")
     
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Stopping auto-sync monitor...")
+        logger.info("Stopping...")
         observer.stop()
     
     observer.join()
-    logger.info("Auto-sync monitor stopped")
 
 if __name__ == "__main__":
     main()
