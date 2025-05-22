@@ -8,6 +8,8 @@ import rarfile
 import time
 import logging
 import re
+from datetime import datetime
+import pytz  # You'll need to install this: pip install pytz
 from urllib.parse import urlparse, unquote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -21,6 +23,33 @@ GOOGLE_PHOTOS_FOLDER = "/sdcard/DCIM/Camera/"  # Update this if needed
 
 # Dictionary to track active downloads
 active_downloads = {}
+
+# IST timezone
+IST = pytz.timezone('Asia/Kolkata')
+
+def set_file_timestamp_to_ist(file_path):
+    """
+    Set file's creation and modification time to current IST time.
+    This ensures Google Photos shows the correct upload date.
+    """
+    try:
+        # Get current IST time as Unix timestamp
+        ist_now = datetime.now(IST)
+        unix_timestamp = ist_now.timestamp()
+        
+        # Set both access time and modification time to current IST
+        os.utime(file_path, (unix_timestamp, unix_timestamp))
+        
+        # For Android, also try to set using touch command for better compatibility
+        ist_formatted = ist_now.strftime("%Y%m%d%H%M.%S")
+        touch_command = f"touch -t {ist_formatted} '{file_path}'"
+        os.system(touch_command)
+        
+        logging.info(f"Set timestamp for {file_path} to {ist_now.strftime('%Y-%m-%d %H:%M:%S IST')}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to set timestamp for {file_path}: {e}")
+        return False
 
 def clean_filename(filename):
     """
@@ -278,9 +307,14 @@ async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
+            
+            # Set file timestamp to current IST time
+            await loop.run_in_executor(None, lambda: set_file_timestamp_to_ist(dest_path))
+            
             await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
 
-            await update.message.reply_text(f"✅ File uploaded to device: {filename}")
+            current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            await update.message.reply_text(f"✅ File uploaded with IST timestamp: {filename}\n🕒 {current_ist}")
         except asyncio.CancelledError:
             # Download was cancelled, do nothing as it's already handled
             pass
@@ -326,16 +360,21 @@ async def handle_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cleaned_file = clean_filename(file)
                     dst = os.path.join(GOOGLE_PHOTOS_FOLDER, cleaned_file)
                     await loop.run_in_executor(None, lambda s=src, d=dst: shutil.copy(s, d))
+                    
+                    # Set file timestamp to current IST time for each extracted file
+                    await loop.run_in_executor(None, lambda d=dst: set_file_timestamp_to_ist(d))
+                    
                     await loop.run_in_executor(None, lambda d=dst: os.system(f"termux-media-scan '{d}'"))
                     uploaded_files += 1
                     await asyncio.sleep(1)
 
             shutil.rmtree(temp_dir)
 
+            current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text=f"✅ Extracted and uploaded {uploaded_files} file(s)."
+                text=f"✅ Extracted and uploaded {uploaded_files} file(s) with IST timestamps.\n🕒 {current_ist}"
             )
         except asyncio.CancelledError:
             # Download was cancelled
@@ -361,7 +400,9 @@ async def handle_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if os.path.isfile(path):
                 await loop.run_in_executor(None, lambda p=path: os.remove(p))
                 deleted += 1
-        await update.message.reply_text(f"🧹 Deleted {deleted} file(s) from {GOOGLE_PHOTOS_FOLDER}")
+        
+        current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        await update.message.reply_text(f"🧹 Deleted {deleted} file(s) from {GOOGLE_PHOTOS_FOLDER}\n🕒 {current_ist}")
     except Exception as e:
         logging.exception("Error in handle_clean")
         await update.message.reply_text(f"❌ Error while cleaning: {e}")
@@ -388,12 +429,17 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
+            
+            # Set file timestamp to current IST time
+            await loop.run_in_executor(None, lambda: set_file_timestamp_to_ist(dest_path))
+            
             await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
 
+            current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text=f"✅ Downloaded and saved: {filename}"
+                text=f"✅ Downloaded with IST timestamp: {filename}\n🕒 {current_ist}"
             )
         except asyncio.CancelledError:
             # Download was cancelled, do nothing as it's already handled
@@ -492,6 +538,35 @@ async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         await update.message.reply_text(f"❌ Root launch failed: {str(e)}")
 
+# New command to fix timestamps of existing files
+async def handle_fix_timestamps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = await update.message.reply_text("🔧 Fixing timestamps of existing files...")
+        
+        fixed_count = 0
+        loop = asyncio.get_event_loop()
+        
+        for file in os.listdir(GOOGLE_PHOTOS_FOLDER):
+            file_path = os.path.join(GOOGLE_PHOTOS_FOLDER, file)
+            if os.path.isfile(file_path):
+                success = await loop.run_in_executor(None, lambda p=file_path: set_file_timestamp_to_ist(p))
+                if success:
+                    fixed_count += 1
+                await asyncio.sleep(0.1)  # Small delay to prevent overwhelming the system
+        
+        # Trigger media scan for all files
+        await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{GOOGLE_PHOTOS_FOLDER}'"))
+        
+        current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Fixed timestamps for {fixed_count} files\n🕒 {current_ist}\n📱 Triggering Google Photos sync..."
+        )
+    except Exception as e:
+        logging.exception("Error fixing timestamps")
+        await update.message.reply_text(f"❌ Error fixing timestamps: {e}")
+
 if __name__ == '__main__':
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -514,9 +589,13 @@ if __name__ == '__main__':
     async def wrapper_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_force_start(update, context))
 
+    async def wrapper_fix_timestamps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_fix_timestamps(update, context))
+
     app.add_handler(CommandHandler("l", wrapper_l))
     app.add_handler(CommandHandler("unzip", wrapper_unzip))
     app.add_handler(CommandHandler("clean", wrapper_clean))
+    app.add_handler(CommandHandler("fix_timestamps", wrapper_fix_timestamps))  # New command
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wrapper_direct))
     app.add_handler(CommandHandler("force_stop", wrapper_force_stop))
     app.add_handler(CommandHandler("force_start", wrapper_force_start))
@@ -524,5 +603,5 @@ if __name__ == '__main__':
     # Add callback handler for cancel button
     app.add_handler(CallbackQueryHandler(handle_cancel_callback))
 
-    print("🤖 Bot running...")
+    print("🤖 Bot running with IST file timestamps...")
     app.run_polling()
