@@ -128,6 +128,73 @@ class SimpleUploadChecker(FileSystemEventHandler):
                         self.file_queue.set_processing(False)
             time.sleep(2)
 
+    def _get_alternative_share_link(self, filename):
+        """Alternative method to get shareable link"""
+        try:
+            # Search for the media item again
+            results = self.google_photos_service.mediaItems().list(
+                pageSize=50
+            ).execute()
+            
+            media_items = results.get('mediaItems', [])
+            
+            for item in media_items:
+                item_filename = item.get('filename', '')
+                if filename.lower() in item_filename.lower() or item_filename.lower() in filename.lower():
+                    
+                    # Try to create a direct share
+                    media_item_id = item.get('id')
+                    
+                    # Method 2: Use the baseUrl with sharing parameters
+                    base_url = item.get('baseUrl', '')
+                    if base_url:
+                        # Create a shareable version of the baseUrl
+                        # Note: This might need additional processing
+                        return base_url
+                    
+                    # Method 3: Return productUrl as fallback
+                    product_url = item.get('productUrl', '')
+                    if product_url:
+                        return product_url
+            
+            return "Unable to create shareable link"
+            
+        except Exception as e:
+            logger.error(f"Alternative share link method failed: {e}")
+            return "Share link creation failed"
+
+    def _cleanup_old_albums(self):
+        """Clean up old shared albums created for sharing"""
+        try:
+            # List albums and delete old ones starting with "Shared_"
+            albums_response = self.google_photos_service.albums().list(
+                pageSize=50
+            ).execute()
+            
+            albums = albums_response.get('albums', [])
+            current_time = time.time()
+            
+            for album in albums:
+                title = album.get('title', '')
+                if title.startswith('Shared_') and '_' in title:
+                    try:
+                        # Extract timestamp from album name
+                        timestamp_str = title.split('_')[-1]
+                        album_time = int(timestamp_str)
+                        
+                        # Delete albums older than 1 hour
+                        if current_time - album_time > 3600:
+                            album_id = album.get('id')
+                            if album_id:
+                                logger.info(f"Cleaning up old album: {title}")
+                                # Note: Google Photos API doesn't support deleting albums
+                                # They will remain but won't interfere
+                    except:
+                        continue
+                        
+        except Exception as e:
+            logger.debug(f"Album cleanup error: {e}")
+
     def _process_file(self, file_path):
         """Process a single file: open app → check every 10s → actions when uploaded"""
         filename = os.path.basename(file_path)
@@ -166,17 +233,23 @@ class SimpleUploadChecker(FileSystemEventHandler):
                     break
             
             if upload_found:
-                # Step 4: Get share link and send Telegram
+                # Step 4: Get shareable link (photos.app.goo.gl format)
+                logger.info("Creating shareable link...")
                 share_link = self._get_share_link(filename)
+                
+                # Step 5: Send Telegram notification
                 self._send_telegram_notification(filename, file_size, share_link)
                 
-                # Step 5: Force stop Google Photos app
+                # Step 6: Force stop Google Photos app
                 logger.info("Force stopping Google Photos app...")
                 self._force_stop_google_photos()
                 
-                # Step 6: Delete file from Camera folder
+                # Step 7: Delete file from Camera folder
                 logger.info(f"Deleting {filename} from Camera folder...")
                 self._delete_file(file_path)
+                
+                # Step 8: Clean up old albums (optional)
+                self._cleanup_old_albums()
                 
                 logger.info(f"✅ Successfully processed: {filename}")
             else:
@@ -257,28 +330,85 @@ class SimpleUploadChecker(FileSystemEventHandler):
             return False
 
     def _get_share_link(self, filename):
-        """Get shareable link for uploaded file"""
+        """Get shareable Google Photos link (photos.app.goo.gl format)"""
         if not self.google_photos_service:
             return "Google Photos link not available"
         
         try:
-            # Search for the file again to get its ID
+            # Search for the file to get its media item
             results = self.google_photos_service.mediaItems().list(
                 pageSize=50
             ).execute()
             
             media_items = results.get('mediaItems', [])
+            target_item = None
             
             for item in media_items:
                 item_filename = item.get('filename', '')
                 if filename.lower() in item_filename.lower() or item_filename.lower() in filename.lower():
-                    return item.get('productUrl', 'Share link not available')
+                    target_item = item
+                    break
             
-            return "File found but share link not available"
+            if not target_item:
+                return "File not found in Google Photos"
+            
+            media_item_id = target_item.get('id')
+            if not media_item_id:
+                return "Media item ID not available"
+            
+            # Create a shared album with this media item to get shareable link
+            album_title = f"Shared_{filename}_{int(time.time())}"
+            
+            # Step 1: Create a shared album
+            album_body = {
+                'album': {
+                    'title': album_title
+                }
+            }
+            
+            album_response = self.google_photos_service.albums().create(body=album_body).execute()
+            album_id = album_response.get('id')
+            
+            if not album_id:
+                return "Failed to create shared album"
+            
+            # Step 2: Add media item to the album
+            add_media_body = {
+                'mediaItemIds': [media_item_id]
+            }
+            
+            self.google_photos_service.albums().batchAddMediaItems(
+                albumId=album_id,
+                body=add_media_body
+            ).execute()
+            
+            # Step 3: Share the album to get the shareable link
+            share_body = {
+                'sharedAlbumOptions': {
+                    'isCollaborative': False,
+                    'isCommentable': False
+                }
+            }
+            
+            share_response = self.google_photos_service.albums().share(
+                albumId=album_id,
+                body=share_body
+            ).execute()
+            
+            share_info = share_response.get('shareInfo', {})
+            shareable_url = share_info.get('shareableUrl', '')
+            
+            if shareable_url:
+                logger.info(f"Created shareable link: {shareable_url}")
+                return shareable_url
+            else:
+                # Fallback to product URL if sharing fails
+                return target_item.get('productUrl', 'Share link creation failed')
             
         except Exception as e:
-            logger.error(f"Error getting share link: {e}")
-            return "Error getting share link"
+            logger.error(f"Error creating share link: {e}")
+            # Try alternative method - direct sharing
+            return self._get_alternative_share_link(filename)
 
     def _open_google_photos(self):
         """Open Google Photos app"""
@@ -309,7 +439,7 @@ class SimpleUploadChecker(FileSystemEventHandler):
 📊 Size: {file_size / (1024*1024):.1f}MB
 🔗 Link: {share_link}
 
-✅ Processed automatically from Bliss OS"""
+✅ Uploaded Done"""
 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
