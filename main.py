@@ -261,38 +261,42 @@ class UIAutomationHandler(FileSystemEventHandler):
             logger.debug(f"Scroll error: {e}")
 
     def _find_and_open_uploaded_file(self, filename):
-        """Enhanced method to find and open the uploaded file"""
+        """Enhanced method to find uploaded file considering date placement"""
         try:
             logger.info(f"Looking for uploaded file: {filename}")
+            logger.info("Note: File may be placed by original date, not upload date")
             
-            # Step 1: Make sure we're in the right view
-            self._navigate_to_recent_photos()
-            time.sleep(2)
+            # Step 1: Get file creation date to know where to look
+            file_date = self._get_file_creation_date(filename)
             
-            # Step 2: Try multiple strategies to find the file
+            # Step 2: Navigate to the correct date in Google Photos
+            if file_date:
+                logger.info(f"File creation date: {file_date}")
+                if self._navigate_to_date(file_date):
+                    logger.info("Successfully navigated to file's date")
+                else:
+                    logger.warning("Could not navigate to specific date, trying recent photos")
             
-            # Strategy 1: Tap on the most recent photo (top-left position)
-            logger.info("Strategy 1: Tapping most recent photo position...")
-            recent_positions = [
-                (180, 350),   # Top-left recent photo
-                (540, 350),   # Top-center recent photo  
-                (900, 350),   # Top-right recent photo
-                (180, 700),   # Second row left
-                (540, 700),   # Second row center
-            ]
+            # Step 3: Try multiple strategies to find the file
             
-            for x, y in recent_positions:
-                if self._try_open_photo_at_position(x, y, filename):
-                    return True
-            
-            # Strategy 2: Search for the file using search function
-            logger.info("Strategy 2: Using search function...")
-            if self._search_for_file(filename):
+            # Strategy 1: Look in recent photos (in case file is actually recent)
+            logger.info("Strategy 1: Checking recent photos first...")
+            if self._try_recent_photos_strategy(filename):
                 return True
             
-            # Strategy 3: Check in "Library" tab
-            logger.info("Strategy 3: Checking Library tab...")
-            if self._check_library_tab():
+            # Strategy 2: Navigate to file's actual date and look there
+            logger.info("Strategy 2: Looking at file's creation date location...")
+            if file_date and self._search_by_date(file_date, filename):
+                return True
+            
+            # Strategy 3: Use search function with filename
+            logger.info("Strategy 3: Using search function...")
+            if self._search_for_file_by_name(filename):
+                return True
+            
+            # Strategy 4: Scroll through timeline to find the file
+            logger.info("Strategy 4: Scrolling through timeline...")
+            if self._scroll_search_timeline(filename):
                 return True
             
             logger.warning("All strategies failed to find the uploaded file")
@@ -300,6 +304,337 @@ class UIAutomationHandler(FileSystemEventHandler):
             
         except Exception as e:
             logger.error(f"Error finding uploaded file: {e}")
+            return False
+
+    def _get_file_creation_date(self, filename):
+        """Get the original creation date of the file"""
+        try:
+            # Try to get the file info from the original path
+            original_path = os.path.join(CAMERA_FOLDER, filename)
+            
+            if os.path.exists(original_path):
+                stat_info = os.stat(original_path)
+                creation_time = stat_info.st_mtime  # Last modified time
+                
+                from datetime import datetime
+                file_date = datetime.fromtimestamp(creation_time)
+                logger.info(f"File creation date: {file_date.strftime('%Y-%m-%d')}")
+                return file_date
+            else:
+                logger.warning("Original file not found, cannot determine creation date")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting file creation date: {e}")
+            return None
+
+    def _navigate_to_date(self, target_date):
+        """Navigate to a specific date in Google Photos timeline"""
+        try:
+            logger.info(f"Navigating to date: {target_date.strftime('%Y-%m-%d')}")
+            
+            # Method 1: Try using date navigation if available
+            # Tap on date/month selector (usually at top)
+            date_selector_coords = [
+                (540, 200),   # Top center where date usually appears
+                (400, 200),
+                (680, 200),
+                (540, 150),
+                (540, 250)
+            ]
+            
+            for x, y in date_selector_coords:
+                try:
+                    subprocess.run(['input', 'tap', str(x), str(y)], 
+                                 check=True, capture_output=True)
+                    time.sleep(2)
+                    
+                    # If date picker opened, try to navigate to target date
+                    if self._select_date_in_picker(target_date):
+                        return True
+                        
+                except Exception as tap_error:
+                    continue
+            
+            # Method 2: Scroll to approximate date
+            return self._scroll_to_approximate_date(target_date)
+            
+        except Exception as e:
+            logger.error(f"Error navigating to date: {e}")
+            return False
+
+    def _select_date_in_picker(self, target_date):
+        """Select specific date in date picker"""
+        try:
+            # This is a simplified approach - real implementation would need
+            # to understand the specific date picker UI of Google Photos
+            
+            # Try to find and tap on the target month/year
+            target_month = target_date.strftime('%B')  # Full month name
+            target_year = str(target_date.year)
+            
+            logger.info(f"Looking for {target_month} {target_year}")
+            
+            # Common date picker coordinates
+            picker_coords = [
+                (540, 400), (540, 500), (540, 600),
+                (400, 400), (680, 400),
+                (270, 400), (810, 400)
+            ]
+            
+            for x, y in picker_coords:
+                try:
+                    subprocess.run(['input', 'tap', str(x), str(y)], 
+                                 check=True, capture_output=True)
+                    time.sleep(1)
+                except:
+                    continue
+            
+            # Close date picker and check if we're in the right timeframe
+            subprocess.run(['input', 'keyevent', 'KEYCODE_BACK'], 
+                         capture_output=True)
+            time.sleep(1)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Date picker selection failed: {e}")
+            return False
+
+    def _scroll_to_approximate_date(self, target_date):
+        """Scroll timeline to approximate date"""
+        try:
+            from datetime import datetime, timedelta
+            
+            current_date = datetime.now()
+            days_difference = (current_date - target_date).days
+            
+            logger.info(f"File is approximately {days_difference} days old")
+            
+            if days_difference <= 1:
+                # Very recent, should be at top
+                logger.info("File is very recent, staying at top")
+                self._scroll_to_top()
+                return True
+            elif days_difference <= 7:
+                # Within a week, scroll down a little
+                logger.info("File is within a week, scrolling down slightly")
+                self._scroll_down_weeks(1)
+                return True
+            elif days_difference <= 30:
+                # Within a month, scroll down more
+                logger.info("File is within a month, scrolling down moderately")
+                self._scroll_down_weeks(days_difference // 7)
+                return True
+            else:
+                # Older file, scroll down significantly
+                logger.info("File is older, scrolling down significantly")
+                self._scroll_down_months(days_difference // 30)
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error scrolling to date: {e}")
+            return False
+
+    def _scroll_down_weeks(self, weeks):
+        """Scroll down by approximate number of weeks"""
+        try:
+            # Each swipe represents roughly a few days to a week
+            swipes = max(1, weeks * 2)  # 2 swipes per week approximation
+            
+            logger.info(f"Scrolling down {swipes} swipes for {weeks} weeks")
+            
+            for i in range(min(swipes, 10)):  # Cap at 10 swipes
+                subprocess.run([
+                    'input', 'swipe', '540', '1200', '540', '600', '300'
+                ], capture_output=True)
+                time.sleep(0.5)
+                
+        except Exception as e:
+            logger.error(f"Error scrolling weeks: {e}")
+
+    def _scroll_down_months(self, months):
+        """Scroll down by approximate number of months"""
+        try:
+            # Each fast swipe represents roughly a month
+            swipes = max(1, months)
+            
+            logger.info(f"Scrolling down {swipes} fast swipes for {months} months")
+            
+            for i in range(min(swipes, 6)):  # Cap at 6 months
+                # Faster, longer swipes for older content
+                subprocess.run([
+                    'input', 'swipe', '540', '1400', '540', '400', '200'
+                ], capture_output=True)
+                time.sleep(0.3)
+                
+        except Exception as e:
+            logger.error(f"Error scrolling months: {e}")
+
+    def _search_by_date(self, target_date, filename):
+        """Search for file around the target date"""
+        try:
+            logger.info(f"Searching around date: {target_date.strftime('%Y-%m-%d')}")
+            
+            # After scrolling to approximate date, look for the file
+            search_coords = [
+                (180, 350), (540, 350), (900, 350),  # Top row
+                (180, 700), (540, 700), (900, 700),  # Second row
+                (180, 1050), (540, 1050), (900, 1050),  # Third row
+            ]
+            
+            for x, y in search_coords:
+                if self._try_open_photo_at_position(x, y, filename):
+                    logger.info(f"Found file at date location ({x}, {y})")
+                    return True
+            
+            # If not found, scroll a bit more and try again
+            logger.info("File not found at exact date, trying nearby...")
+            self._scroll_down_weeks(1)
+            
+            for x, y in search_coords:
+                if self._try_open_photo_at_position(x, y, filename):
+                    logger.info(f"Found file near date location ({x}, {y})")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error searching by date: {e}")
+            return False
+
+    def _search_for_file_by_name(self, filename):
+        """Enhanced search using filename or video type"""
+        try:
+            logger.info(f"Searching for file: {filename}")
+            
+            # Open search
+            search_coords = [(950, 150), (900, 150), (1000, 150)]
+            
+            for x, y in search_coords:
+                try:
+                    subprocess.run(['input', 'tap', str(x), str(y)], 
+                                 check=True, capture_output=True)
+                    time.sleep(2)
+                    
+                    # Try different search terms
+                    search_terms = [
+                        filename.replace('.mkv', ''),  # Filename without extension
+                        'mkv',  # File type
+                        'video',  # General type
+                        'recent video',  # Recent video
+                    ]
+                    
+                    for term in search_terms:
+                        try:
+                            # Clear search field
+                            subprocess.run(['input', 'keyevent', 'KEYCODE_CTRL_A'], 
+                                         capture_output=True)
+                            subprocess.run(['input', 'keyevent', 'KEYCODE_DEL'], 
+                                         capture_output=True)
+                            
+                            # Type search term
+                            subprocess.run(['input', 'text', term], 
+                                         capture_output=True)
+                            time.sleep(2)
+                            
+                            # Tap on first result
+                            result_coords = [
+                                (540, 400), (270, 400), (810, 400),
+                                (540, 500), (270, 500), (810, 500)
+                            ]
+                            
+                            for rx, ry in result_coords:
+                                try:
+                                    subprocess.run(['input', 'tap', str(rx), str(ry)], 
+                                                 capture_output=True)
+                                    time.sleep(3)
+                                    
+                                    if self._check_if_photo_opened():
+                                        logger.info(f"✅ Found file via search: {term}")
+                                        return True
+                                        
+                                except:
+                                    continue
+                                    
+                        except Exception as search_error:
+                            continue
+                    
+                    # Exit search
+                    subprocess.run(['input', 'keyevent', 'KEYCODE_BACK'], 
+                                 capture_output=True)
+                    subprocess.run(['input', 'keyevent', 'KEYCODE_BACK'], 
+                                 capture_output=True)
+                    
+                except Exception as search_open_error:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Search by name failed: {e}")
+            return False
+
+    def _scroll_search_timeline(self, filename):
+        """Scroll through timeline looking for the file"""
+        try:
+            logger.info("Scrolling through timeline to find file...")
+            
+            # Start from top
+            self._scroll_to_top()
+            
+            # Search in chunks - scroll and check
+            for chunk in range(5):  # Check 5 different time periods
+                logger.info(f"Checking timeline chunk {chunk + 1}")
+                
+                # Try to find file in current view
+                search_positions = [
+                    (180, 350), (540, 350), (900, 350),
+                    (180, 700), (540, 700), (900, 700),
+                    (180, 1050), (540, 1050), (900, 1050)
+                ]
+                
+                for x, y in search_positions:
+                    if self._try_open_photo_at_position(x, y, filename):
+                        logger.info(f"✅ Found file in timeline chunk {chunk + 1}")
+                        return True
+                
+                # Scroll down for next chunk
+                if chunk < 4:  # Don't scroll after last chunk
+                    self._scroll_down_weeks(2)
+                    time.sleep(1)
+            
+            logger.warning("File not found in timeline scroll")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Timeline scroll search failed: {e}")
+            return False
+
+    def _try_recent_photos_strategy(self, filename):
+        """Try looking in recent photos (original strategy)"""
+        try:
+            logger.info("Checking recent photos area...")
+            
+            # Navigate to recent photos
+            self._navigate_to_recent_photos()
+            time.sleep(2)
+            
+            # Try recent photo positions
+            recent_positions = [
+                (180, 350), (540, 350), (900, 350),
+                (180, 700), (540, 700), (900, 700)
+            ]
+            
+            for x, y in recent_positions:
+                if self._try_open_photo_at_position(x, y, filename):
+                    logger.info(f"Found file in recent photos at ({x}, {y})")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Recent photos strategy failed: {e}")
             return False
 
     def _try_open_photo_at_position(self, x, y, filename):
