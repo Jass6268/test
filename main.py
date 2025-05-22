@@ -58,18 +58,40 @@ class MkvHandler(FileSystemEventHandler):
     def _open_browser(self, url):
         """Try to open URL in system browser using multiple methods"""
         try:
-            # Method 1: Python's webbrowser module
+            # Method 1: Termux-specific command
+            if os.path.exists('/data/data/com.termux'):
+                try:
+                    # Termux uses am (activity manager) to open browsers
+                    subprocess.run([
+                        'am', 'start', 
+                        '-a', 'android.intent.action.VIEW', 
+                        '-d', url
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                except Exception as termux_error:
+                    logger.warning(f"Termux am command failed: {termux_error}")
+                    
+                    # Try termux-open if available
+                    try:
+                        subprocess.run(['termux-open', url], check=True, 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return True
+                    except Exception as termux_open_error:
+                        logger.warning(f"termux-open failed: {termux_open_error}")
+            
+            # Method 2: Python's webbrowser module
             webbrowser.open(url)
             return True
+            
         except Exception as e1:
             logger.warning(f"webbrowser.open failed: {e1}")
             
             try:
-                # Method 2: Platform-specific commands
+                # Method 3: Platform-specific commands
                 system = platform.system().lower()
                 
                 if system == "linux":
-                    # Try different Linux browsers
+                    # Try different Linux browsers and commands
                     browsers = ['xdg-open', 'google-chrome', 'firefox', 'chromium-browser', 'opera']
                     for browser in browsers:
                         try:
