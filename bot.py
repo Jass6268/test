@@ -458,28 +458,39 @@ async def handle_force_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("⏳ Starting Google Photos...")
+        msg = await update.message.reply_text("⚡ Root-forcing Google Photos open...")
         
-        # Start Google Photos with flags to ensure a fresh start
+        # Pure root launch commands (no stopping)
+        launch_commands = [
+            # 1. Direct root launch with clear-top
+            "su -c 'am start -n com.google.android.apps.photos/.home.HomeActivity --activity-clear-top'",
+            
+            # 2. Alternative root launch with MAIN action
+            "su -c 'am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.google.android.apps.photos/.home.HomeActivity'",
+            
+            # 3. Deep intent launch (opens directly to gallery)
+            "su -c 'am start -a android.intent.action.VIEW -d content://media/external/images/media com.google.android.apps.photos'"
+        ]
+        
         loop = asyncio.get_event_loop()
-        start_cmd = (
-            "am start -n com.google.android.apps.photos/.home.HomeActivity " +
-            "-a android.intent.action.MAIN " +
-            "-c android.intent.category.LAUNCHER " +
-            "--activity-clear-top"
-        )
         
-        await loop.run_in_executor(None, lambda: os.system(start_cmd))
+        # Execute all launch commands sequentially (no stopping logic)
+        for cmd in launch_commands:
+            try:
+                await loop.run_in_executor(None, lambda c=cmd: os.system(c))
+                await asyncio.sleep(1)  # Brief delay between attempts
+            except:
+                continue
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text="✅ Google Photos started successfully!"
+            text="✅ Google Photos **forced open** with root!",
+            parse_mode='Markdown'
         )
         
     except Exception as e:
-        logging.exception("Error starting Google Photos")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"❌ Root launch failed: {str(e)}")
 
 if __name__ == '__main__':
     BOT_TOKEN = "6385636650:AAGsa2aZ2mQtPFB2tk81rViOO_H_6hHFoQE"  # Replace with your actual bot token
