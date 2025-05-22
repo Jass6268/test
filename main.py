@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple Google Photos Upload Checker
------------------------------------
+Simple Google Photos Upload Checker with Cancel Command
+-------------------------------------------------------
 1. Detects new MKV files in Camera folder
 2. Opens Google Photos app for auto-sync
 3. Checks every 10 seconds if file uploaded to Google Photos
 4. When uploaded: sends Telegram link, force stops app, deletes file
 5. Processes next file
+6. /cancel command to skip current file and process next
 """
 
 import os
@@ -16,11 +17,14 @@ import requests
 import logging
 import subprocess
 import threading
+import asyncio
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Set up logging
 logging.basicConfig(
@@ -44,10 +48,12 @@ TOKEN_FILE = 'token.json'
 CREDENTIALS_FILE = 'credentials.json'
 
 class FileQueue:
-    """Thread-safe queue for processing files one by one"""
+    """Thread-safe queue for processing files one by one with cancel support"""
     def __init__(self):
         self.queue = []
         self.processing = False
+        self.current_file = None
+        self.cancel_requested = False
         self.lock = threading.Lock()
     
     def add_file(self, file_path):
@@ -62,16 +68,44 @@ class FileQueue:
                 return self.queue.pop(0)
             return None
     
-    def set_processing(self, status):
+    def set_processing(self, status, file_path=None):
         with self.lock:
             self.processing = status
+            self.current_file = file_path if status else None
+            if not status:  # Reset cancel when processing stops
+                self.cancel_requested = False
     
     def is_processing(self):
         with self.lock:
             return self.processing
+    
+    def get_current_file(self):
+        with self.lock:
+            return self.current_file
+    
+    def request_cancel(self):
+        with self.lock:
+            self.cancel_requested = True
+            logger.info(f"Cancel requested for: {os.path.basename(self.current_file) if self.current_file else 'current file'}")
+    
+    def is_cancel_requested(self):
+        with self.lock:
+            return self.cancel_requested
+    
+    def get_queue_status(self):
+        with self.lock:
+            return {
+                'queue_size': len(self.queue),
+                'processing': self.processing,
+                'current_file': os.path.basename(self.current_file) if self.current_file else None,
+                'next_files': [os.path.basename(f) for f in self.queue[:3]]  # Show next 3 files
+            }
+
+# Global reference to the handler for cancel command
+upload_checker_handler = None
 
 class SimpleUploadChecker(FileSystemEventHandler):
-    """Simple handler that checks upload status every 10 seconds"""
+    """Simple handler that checks upload status every 10 seconds with cancel support"""
 
     def __init__(self):
         super().__init__()
@@ -79,7 +113,12 @@ class SimpleUploadChecker(FileSystemEventHandler):
         self.google_photos_service = self._setup_google_photos()
         self.processor_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.processor_thread.start()
-        logger.info("Simple upload checker initialized")
+        
+        # Set global reference for cancel command
+        global upload_checker_handler
+        upload_checker_handler = self
+        
+        logger.info("Simple upload checker with cancel support initialized")
 
     def _setup_google_photos(self):
         """Set up Google Photos API service"""
@@ -108,18 +147,23 @@ class SimpleUploadChecker(FileSystemEventHandler):
         """Handle file creation events"""
         if not event.is_directory and event.src_path.lower().endswith('.mkv'):
             logger.info(f"New MKV file detected: {os.path.basename(event.src_path)}")
-            # Wait a moment to ensure file is completely written
-            time.sleep(5)
+            
+            # Wait 3 seconds as requested before processing
+            logger.info("Waiting 3 seconds before processing...")
+            time.sleep(3)
+            
             if os.path.exists(event.src_path):
                 self.file_queue.add_file(event.src_path)
+            else:
+                logger.warning(f"File disappeared after 3 seconds: {os.path.basename(event.src_path)}")
 
     def _process_queue(self):
-        """Process files one by one from the queue"""
+        """Process files one by one from the queue with cancel support"""
         while True:
             if not self.file_queue.is_processing():
                 file_path = self.file_queue.get_next_file()
                 if file_path:
-                    self.file_queue.set_processing(True)
+                    self.file_queue.set_processing(True, file_path)
                     try:
                         self._process_file(file_path)
                     except Exception as e:
@@ -127,6 +171,17 @@ class SimpleUploadChecker(FileSystemEventHandler):
                     finally:
                         self.file_queue.set_processing(False)
             time.sleep(2)
+
+    def cancel_current_processing(self):
+        """Cancel current file processing and move to next"""
+        if self.file_queue.is_processing():
+            self.file_queue.request_cancel()
+            return True
+        return False
+
+    def get_queue_status(self):
+        """Get current queue status"""
+        return self.file_queue.get_queue_status()
 
     def _get_alternative_share_link(self, filename):
         """Alternative method to get shareable link"""
@@ -206,13 +261,26 @@ class SimpleUploadChecker(FileSystemEventHandler):
                 logger.warning(f"File no longer exists: {filename}")
                 return
             
+            # Check for cancel before starting
+            if self.file_queue.is_cancel_requested():
+                logger.info(f"❌ Processing cancelled for: {filename}")
+                self._send_cancel_notification(filename)
+                return
+            
             file_size = os.path.getsize(file_path)
             logger.info(f"File size: {file_size / (1024*1024):.1f}MB")
             
-            # Step 2: Open Google Photos app
-            logger.info("Opening Google Photos app...")
+            # Step 2: Wait 3 seconds then open Google Photos app
+            logger.info("Opening Google Photos app after detection...")
             self._open_google_photos()
-            time.sleep(15)  # Give app time to start
+            time.sleep(15)  # Give app time to start and begin sync
+            
+            # Check for cancel after opening app
+            if self.file_queue.is_cancel_requested():
+                logger.info(f"❌ Processing cancelled after opening app: {filename}")
+                self._force_stop_google_photos()
+                self._send_cancel_notification(filename)
+                return
             
             # Step 3: Check every 10 seconds if file is uploaded
             logger.info(f"Checking every {CHECK_INTERVAL} seconds if {filename} is uploaded...")
@@ -221,6 +289,13 @@ class SimpleUploadChecker(FileSystemEventHandler):
             total_check_time = 0
             
             while total_check_time < MAX_CHECK_TIME:
+                # Check for cancel during upload checking
+                if self.file_queue.is_cancel_requested():
+                    logger.info(f"❌ Processing cancelled during upload check: {filename}")
+                    self._force_stop_google_photos()
+                    self._send_cancel_notification(filename)
+                    return
+                
                 time.sleep(CHECK_INTERVAL)
                 total_check_time += CHECK_INTERVAL
                 
@@ -233,6 +308,13 @@ class SimpleUploadChecker(FileSystemEventHandler):
                     break
             
             if upload_found:
+                # Check for cancel before final actions
+                if self.file_queue.is_cancel_requested():
+                    logger.info(f"❌ Processing cancelled before final actions: {filename}")
+                    self._force_stop_google_photos()
+                    self._send_cancel_notification(filename)
+                    return
+                
                 # Step 4: Get shareable link (photos.app.goo.gl format)
                 logger.info("Creating shareable link...")
                 share_link = self._get_share_link(filename)
@@ -262,6 +344,27 @@ class SimpleUploadChecker(FileSystemEventHandler):
                 self._force_stop_google_photos()
             except:
                 pass
+
+    def _send_cancel_notification(self, filename):
+        """Send notification that processing was cancelled"""
+        try:
+            next_files = self.file_queue.get_queue_status()['next_files']
+            next_info = f"\nNext in queue: {', '.join(next_files[:2])}" if next_files else "\nQueue is empty"
+            
+            message = f"""❌ Processing Cancelled
+
+📁 Cancelled file: {filename}
+🔄 Moving to next file in queue...{next_info}
+
+Use /status to check queue status"""
+
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            requests.post(url, data=data, timeout=10)
+            
+            logger.info(f"Cancel notification sent for: {filename}")
+        except Exception as e:
+            logger.error(f"Error sending cancel notification: {e}")
 
     def _check_file_uploaded(self, filename, file_size):
         """Check if file is uploaded to Google Photos"""
@@ -439,7 +542,7 @@ class SimpleUploadChecker(FileSystemEventHandler):
 📊 Size: {file_size / (1024*1024):.1f}MB
 🔗 Link: {share_link}
 
-✅ Uploaded Done"""
+✅ Processed automatically from Bliss OS"""
 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
@@ -453,14 +556,78 @@ class SimpleUploadChecker(FileSystemEventHandler):
             logger.error(f"Error sending Telegram: {e}")
 
     def _force_stop_google_photos(self):
-        """Force stop Google Photos app"""
+        """Force stop Google Photos app using multiple robust methods"""
         try:
-            subprocess.run([
-                'su', '-c', f'am force-stop {GOOGLE_PHOTOS_PACKAGE}'
-            ], capture_output=True)
-            logger.info("Google Photos app force stopped")
+            logger.info("⚡ Force-stopping Google Photos (ROOT)...")
+            
+            # Root-based killing commands
+            kill_commands = [
+                # Method 1: Using 'am' with root (force-stop)
+                f"su -c 'am force-stop {GOOGLE_PHOTOS_PACKAGE}'",
+                
+                # Method 2: Using 'killall' (root)
+                f"su -c 'killall -9 {GOOGLE_PHOTOS_PACKAGE}'",
+                
+                # Method 3: Using 'pkill' (if available)
+                f"su -c 'pkill -9 -f {GOOGLE_PHOTOS_PACKAGE}'",
+                
+                # Method 4: Manual process ID killing (robust)
+                f"su -c 'ps | grep {GOOGLE_PHOTOS_PACKAGE} | grep -v grep | awk \"{{print \\$2}}\" | xargs kill -9'",
+            ]
+            
+            success = False
+            
+            for cmd in kill_commands:
+                try:
+                    logger.info(f"Executing: {cmd}")
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    
+                    if result.returncode == 0:
+                        logger.info(f"✅ Command successful: {cmd}")
+                        success = True
+                    else:
+                        logger.warning(f"Command returned {result.returncode}: {result.stderr}")
+                    
+                    time.sleep(1)  # Wait between commands
+                    
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Command timeout: {cmd}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Command failed: {cmd} - {e}")
+                    continue
+            
+            # Verify if stopped
+            time.sleep(2)
+            check_cmd = f"su -c 'ps | grep {GOOGLE_PHOTOS_PACKAGE} | grep -v grep'"
+            try:
+                check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=5)
+                
+                if not check_result.stdout.strip():
+                    logger.info("✅ Google Photos force-stopped successfully (root)!")
+                else:
+                    logger.warning("⚠️ Google Photos might still be running")
+                    logger.info(f"Running processes: {check_result.stdout}")
+                    
+            except Exception as e:
+                logger.warning(f"Could not verify stop status: {e}")
+            
+            # Optional: Clear app cache/data (uncomment if needed)
+            # clear_cmd = f"su -c 'pm clear {GOOGLE_PHOTOS_PACKAGE}'"
+            # subprocess.run(clear_cmd, shell=True, capture_output=True, timeout=10)
+            
         except Exception as e:
-            logger.error(f"Error force stopping: {e}")
+            logger.error(f"Error force stopping Google Photos: {str(e)}")
+            
+            # Fallback method
+            try:
+                logger.info("Trying fallback force stop method...")
+                subprocess.run([
+                    'su', '-c', f'pkill -f {GOOGLE_PHOTOS_PACKAGE}'
+                ], capture_output=True, timeout=5)
+                logger.info("Fallback method executed")
+            except Exception as fallback_error:
+                logger.error(f"Fallback method also failed: {fallback_error}")
 
     def _delete_file(self, file_path):
         """Delete file from Camera folder"""
@@ -471,29 +638,154 @@ class SimpleUploadChecker(FileSystemEventHandler):
         except Exception as e:
             logger.error(f"Error deleting file: {e}")
 
+# Telegram Bot Commands
+async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /cancel command to skip current file processing"""
+    try:
+        if upload_checker_handler is None:
+            await update.message.reply_text("❌ Upload checker not initialized")
+            return
+        
+        status = upload_checker_handler.get_queue_status()
+        
+        if not status['processing']:
+            await update.message.reply_text("ℹ️ No file is currently being processed")
+            return
+        
+        current_file = status['current_file']
+        success = upload_checker_handler.cancel_current_processing()
+        
+        if success:
+            next_files = status['next_files']
+            next_info = f"\nNext: {', '.join(next_files[:2])}" if next_files else "\nQueue is empty"
+            
+            await update.message.reply_text(
+                f"❌ **Processing Cancelled**\n\n"
+                f"📁 Cancelled: {current_file}\n"
+                f"🔄 Moving to next file...{next_info}"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to cancel current processing")
+            
+    except Exception as e:
+        logger.error(f"Error in cancel command: {e}")
+        await update.message.reply_text(f"❌ Cancel Error: {e}")
+
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status command to show queue status"""
+    try:
+        if upload_checker_handler is None:
+            await update.message.reply_text("❌ Upload checker not initialized")
+            return
+        
+        status = upload_checker_handler.get_queue_status()
+        
+        if status['processing']:
+            current_info = f"🔄 **Currently Processing:**\n📁 {status['current_file']}\n\n"
+        else:
+            current_info = "✅ **Status:** Idle (no file processing)\n\n"
+        
+        if status['queue_size'] > 0:
+            queue_info = f"📋 **Queue:** {status['queue_size']} files waiting\n"
+            if status['next_files']:
+                queue_info += f"📂 Next: {', '.join(status['next_files'])}"
+        else:
+            queue_info = "📋 **Queue:** Empty"
+        
+        await update.message.reply_text(
+            f"{current_info}{queue_info}\n\n"
+            f"💡 Use /cancel to skip current file"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in status command: {e}")
+        await update.message.reply_text(f"❌ Status Error: {e}")
+
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command"""
+    help_text = """🤖 **Google Photos Auto Upload Bot**
+
+**Commands:**
+/cancel - Cancel current file processing and move to next
+/status - Show queue status and current processing
+/help - Show this help message
+
+**How it works:**
+1. Drop MKV files in Camera folder
+2. Bot detects and auto-uploads to Google Photos
+3. Sends you shareable links via Telegram
+4. Automatically deletes original files
+
+**Cancel feature:**
+- Use /cancel to skip current upload
+- Bot will force-stop Google Photos app
+- Moves to next file in queue immediately"""
+    
+    await update.message.reply_text(help_text)
+
+def setup_telegram_bot():
+    """Set up Telegram bot for commands"""
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("No Telegram bot token provided - /cancel command not available")
+        return None
+    
+    try:
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("cancel", handle_cancel))
+        application.add_handler(CommandHandler("status", handle_status))
+        application.add_handler(CommandHandler("help", handle_help))
+        
+        return application
+    except Exception as e:
+        logger.error(f"Error setting up Telegram bot: {e}")
+        return None
+
 def main():
-    """Main function"""
+    """Main function with Telegram bot integration"""
     logger.info("="*60)
-    logger.info("SIMPLE GOOGLE PHOTOS UPLOAD CHECKER")
+    logger.info("SIMPLE GOOGLE PHOTOS UPLOAD CHECKER WITH /CANCEL")
     logger.info("="*60)
     logger.info(f"Monitoring: {CAMERA_FOLDER}")
     logger.info(f"Check interval: {CHECK_INTERVAL} seconds")
+    logger.info("Commands: /cancel, /status, /help")
     logger.info("Workflow: Detect → Open App → Check every 10s → Share → Stop → Delete")
     logger.info("="*60)
     
+    # Set up file monitoring
     event_handler = SimpleUploadChecker()
     observer = Observer()
     observer.schedule(event_handler, CAMERA_FOLDER, recursive=False)
     observer.start()
     
-    logger.info("🚀 Simple upload checker started!")
+    # Set up Telegram bot
+    telegram_app = setup_telegram_bot()
+    
+    logger.info("🚀 Upload checker with /cancel support started!")
     
     try:
-        while True:
-            time.sleep(1)
+        if telegram_app:
+            # Run both file monitoring and Telegram bot
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Start telegram bot in background
+            telegram_task = loop.create_task(telegram_app.run_polling())
+            
+            # Keep the main thread running
+            while True:
+                time.sleep(1)
+        else:
+            # Run only file monitoring
+            while True:
+                time.sleep(1)
+                
     except KeyboardInterrupt:
         logger.info("Stopping...")
         observer.stop()
+        if telegram_app:
+            telegram_app.stop()
     
     observer.join()
 
