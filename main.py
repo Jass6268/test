@@ -94,8 +94,9 @@ class AutomaticLatestHandler(FileSystemEventHandler):
             thread.start()
 
     def _process_file_automatic(self, file_path):
-        """Fully automatic file processing with real-time detection"""
+        """Check existing files first, then monitor if needed"""
         filename = os.path.basename(file_path)
+        base_filename = filename.replace('.mkv', '').lower()  # Remove extension for matching
         upload_start_time = datetime.now()
         
         try:
@@ -110,52 +111,66 @@ class AutomaticLatestHandler(FileSystemEventHandler):
             logger.info(f"📁 Processing: {filename} ({file_size / (1024*1024):.1f}MB)")
             
             # Step 1: Send start notification
-            self._send_start_notification(filename, file_size)
+            self._send_immediate_check_notification(filename, file_size)
             
-            # Step 2: Open Google Photos
+            # Step 2: Open Google Photos (for background sync)
             logger.info("📱 Opening Google Photos...")
             self._open_google_photos()
-            time.sleep(10)  # Let app start
+            time.sleep(5)  # Quick start
             
-            # Step 3: Real-time upload detection (instead of blind waiting)
-            logger.info("🔍 Monitoring upload progress in real-time...")
+            # Step 3: IMMEDIATE CHECK - Look for existing file
+            logger.info(f"🔍 Checking latest 10 files for match with: {base_filename}")
+            existing_file = self._check_latest_10_files(base_filename, filename)
+            
+            if existing_file:
+                logger.info(f"🎉 FOUND EXISTING FILE: {existing_file.get('filename', 'Unknown')}")
+                
+                # Create share link immediately
+                share_link = self._create_automatic_share_link(existing_file, filename)
+                
+                if share_link:
+                    self._send_instant_success_notification(filename, file_size, share_link)
+                    logger.info(f"⚡ INSTANT success: {share_link}")
+                else:
+                    share_link = self._create_fallback_share_link(existing_file)
+                    self._send_partial_success_notification(filename, file_size, share_link)
+                
+                # Quick cleanup
+                self._force_stop_google_photos()
+                self._delete_file(file_path)
+                logger.info(f"⚡ INSTANT processing completed: {filename}")
+                return
+            
+            # Step 4: If not found, start real-time monitoring
+            logger.info("📡 File not found in latest 10, starting upload monitoring...")
+            self._send_monitoring_fallback_notification(filename)
             
             upload_detected = self._monitor_upload_realtime(upload_start_time, filename, file_size)
             
             if upload_detected:
-                logger.info("✅ Upload detected via real-time monitoring!")
+                logger.info("✅ Upload detected via monitoring!")
                 
-                # Step 4: Find the latest uploaded file using API
-                logger.info("🔍 Searching for uploaded file using API...")
+                # Find the uploaded file
                 latest_media_item = self._find_latest_uploaded_file(upload_start_time, filename)
                 
                 if latest_media_item:
-                    logger.info(f"✅ Found uploaded file: {latest_media_item.get('filename', 'Unknown')}")
-                    
-                    # Step 5: Create share link automatically
                     share_link = self._create_automatic_share_link(latest_media_item, filename)
                     
                     if share_link:
-                        # Step 6: Send success notification with link
                         self._send_success_notification(filename, file_size, share_link)
-                        logger.info(f"✅ Automatic share link created: {share_link}")
                     else:
-                        # Fallback: try alternative sharing method
                         share_link = self._create_fallback_share_link(latest_media_item)
                         self._send_partial_success_notification(filename, file_size, share_link)
                 else:
-                    logger.warning("❌ Could not find uploaded file in Google Photos")
                     self._send_not_found_notification(filename)
             else:
-                logger.warning("❌ Upload not detected within time limit")
                 self._send_timeout_notification(filename)
             
-            # Step 7: Cleanup
-            logger.info("🧹 Cleaning up...")
+            # Cleanup
             self._force_stop_google_photos()
             self._delete_file(file_path)
             
-            logger.info(f"🏁 Completed automatic processing: {filename}")
+            logger.info(f"🏁 Completed processing: {filename}")
             
         except Exception as e:
             logger.error(f"❌ Error in automatic processing: {str(e)}")
@@ -163,6 +178,172 @@ class AutomaticLatestHandler(FileSystemEventHandler):
                 self._force_stop_google_photos()
             except:
                 pass
+
+    def _check_latest_10_files(self, base_filename, original_filename):
+        """Check the latest 10 files in Google Photos for filename match"""
+        if not self.google_photos_service:
+            logger.error("No Google Photos API service available")
+            return None
+        
+        try:
+            logger.info("📊 Querying latest 10 files from Google Photos...")
+            
+            # Get the 10 most recent media items
+            results = self.google_photos_service.mediaItems().list(
+                pageSize=10
+            ).execute()
+            
+            media_items = results.get('mediaItems', [])
+            logger.info(f"📋 Found {len(media_items)} recent items to check")
+            
+            # Check each item for filename match
+            for i, item in enumerate(media_items, 1):
+                try:
+                    item_filename = item.get('filename', '').lower()
+                    item_mime = item.get('mimeType', '')
+                    
+                    logger.info(f"🔍 Check {i}/10: {item_filename} (type: {item_mime[:20]}...)")
+                    
+                    # Skip non-videos
+                    if not item_mime.startswith('video/'):
+                        logger.debug(f"   ↳ Skipping - not a video")
+                        continue
+                    
+                    # Check for filename match (flexible matching)
+                    if self._is_filename_match(base_filename, item_filename, original_filename):
+                        logger.info(f"🎯 MATCH FOUND: {item_filename}")
+                        logger.info(f"   ↳ Original: {original_filename}")
+                        logger.info(f"   ↳ Found: {item_filename}")
+                        return item
+                    else:
+                        logger.debug(f"   ↳ No match: {base_filename} vs {item_filename}")
+                
+                except Exception as item_error:
+                    logger.debug(f"Error checking item {i}: {item_error}")
+                    continue
+            
+            logger.info("❌ No matching file found in latest 10 items")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error checking latest 10 files: {e}")
+            return None
+
+    def _is_filename_match(self, base_filename, item_filename, original_filename):
+        """Check if filenames match with flexible matching"""
+        try:
+            # Remove extension from item filename
+            item_base = item_filename.replace('.mkv', '').replace('.mp4', '').replace('.mov', '').lower()
+            
+            # Method 1: Exact base filename match
+            if base_filename == item_base:
+                return True
+            
+            # Method 2: Base filename is contained in item filename
+            if base_filename in item_filename:
+                return True
+            
+            # Method 3: Item filename is contained in base filename
+            if item_base in base_filename:
+                return True
+            
+            # Method 4: Check original filename directly
+            if original_filename.lower() in item_filename:
+                return True
+            
+            # Method 5: Check without common prefixes (IMG_, VID_, etc.)
+            clean_base = base_filename.replace('img_', '').replace('vid_', '').replace('video_', '')
+            clean_item = item_base.replace('img_', '').replace('vid_', '').replace('video_', '')
+            
+            if clean_base == clean_item:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error in filename matching: {e}")
+            return False
+
+    def _send_immediate_check_notification(self, filename, file_size):
+        """Send notification about immediate check"""
+        message = f"""⚡ INSTANT CHECK STARTING
+
+📁 File: {filename}
+📊 Size: {file_size / (1024*1024):.1f}MB
+🎯 Strategy: Check latest 10 files first
+
+🔍 Looking for existing match in Google Photos...
+⚡ This should be INSTANT if file already uploaded!"""
+
+        self._send_telegram_message(message)
+
+    def _send_instant_success_notification(self, filename, file_size, share_link):
+        """Send notification for instant success"""
+        if 'photos.app.goo.gl' in share_link:
+            link_type = "🎯 Perfect short link!"
+        elif 'photos.google.com' in share_link:
+            link_type = "✅ Google Photos link"
+        else:
+            link_type = "🔗 Share link"
+
+        message = f"""⚡ INSTANT SUCCESS! (Found in latest 10)
+
+📁 File: {filename}
+📊 Size: {file_size / (1024*1024):.1f}MB
+🔗 Link: {share_link}
+
+{link_type}
+🎯 Found existing file immediately!
+⚡ No waiting required!
+🗑️ Original file deleted
+📱 Google Photos closed
+
+🚀 Ready to share instantly!"""
+
+        self._send_telegram_message(message)
+
+    def _send_monitoring_fallback_notification(self, filename):
+        """Send notification when falling back to monitoring"""
+        message = f"""🔄 FALLBACK TO MONITORING
+
+📁 File: {filename}
+📊 Status: Not found in latest 10 files
+🔍 Mode: Starting upload monitoring...
+
+📡 Will check every 15 seconds for new upload
+⏰ This means file is still uploading"""
+
+        self._send_telegram_message(message)
+
+    def _monitor_upload_realtime(self, start_time, filename, file_size):
+        """Monitor with shorter intervals since we already checked existing files"""
+        max_wait_time = self._calculate_max_wait_time(file_size)
+        check_interval = 10  # Check every 10 seconds (faster since we're only monitoring new uploads)
+        total_waited = 0
+        
+        logger.info(f"⏱️ Upload monitoring started (max {max_wait_time//60}m)")
+        
+        while total_waited < max_wait_time:
+            time.sleep(check_interval)
+            total_waited += check_interval
+            
+            # Check for new uploads only (not all files)
+            if self._check_upload_completion_api(start_time, filename):
+                elapsed_minutes = total_waited // 60
+                elapsed_seconds = total_waited % 60
+                logger.info(f"🎉 New upload detected after {elapsed_minutes}m {elapsed_seconds}s!")
+                
+                self._send_quick_detection_notification(filename, total_waited)
+                return True
+            
+            # Send progress update every 30 seconds (less frequent)
+            if total_waited % 30 == 0:
+                elapsed_minutes = total_waited // 60
+                remaining_minutes = (max_wait_time - total_waited) // 60
+                logger.info(f"📡 Still monitoring... {elapsed_minutes}m elapsed, ~{remaining_minutes}m remaining")
+        
+        logger.warning(f"⏰ Upload monitoring timeout after {max_wait_time//60} minutes")
+        return False
 
     def _monitor_upload_realtime(self, start_time, filename, file_size):
         """Monitor upload progress in real-time using API polling"""
