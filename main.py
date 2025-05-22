@@ -196,16 +196,41 @@ class MkvHandler(FileSystemEventHandler):
             filename = os.path.basename(file_path)
             mime_type = 'video/x-matroska'
             
+            # Get fresh credentials
+            creds = None
+            if os.path.exists(TOKEN_FILE):
+                with open(TOKEN_FILE, 'r') as token:
+                    creds = Credentials.from_authorized_user_info(
+                        json.loads(token.read()), SCOPES)
+            
+            # Refresh if needed
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                # Save refreshed token
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
+            
+            if not creds or not creds.valid:
+                logger.error("Invalid credentials for upload")
+                return
+            
             upload_url = 'https://photoslibrary.googleapis.com/v1/uploads'
             headers = {
-                'Authorization': f'Bearer {self.google_photos_service._credentials.token}',
+                'Authorization': f'Bearer {creds.token}',
                 'Content-Type': 'application/octet-stream',
                 'X-Goog-Upload-File-Name': filename,
                 'X-Goog-Upload-Protocol': 'raw',
             }
             
             with open(file_path, 'rb') as file_data:
-                upload_token = requests.post(upload_url, headers=headers, data=file_data).text
+                upload_response = requests.post(upload_url, headers=headers, data=file_data)
+            
+            if upload_response.status_code != 200:
+                logger.error(f"Upload failed with status {upload_response.status_code}: {upload_response.text}")
+                return
+                
+            upload_token = upload_response.text.strip()
+            logger.info("File uploaded successfully, creating media item...")
             
             # 2. Create the media item in Google Photos
             body = {
@@ -217,7 +242,9 @@ class MkvHandler(FileSystemEventHandler):
                 }]
             }
             
-            response = self.google_photos_service.mediaItems().batchCreate(body=body).execute()
+            # Use fresh service instance with current credentials
+            service = build('photoslibrary', 'v1', credentials=creds, static_discovery=False)
+            response = service.mediaItems().batchCreate(body=body).execute()
             
             if 'newMediaItemResults' in response:
                 item = response['newMediaItemResults'][0]['mediaItem']
@@ -235,6 +262,9 @@ class MkvHandler(FileSystemEventHandler):
         
         except Exception as e:
             logger.error(f"Error uploading to Google Photos: {str(e)}")
+            # Print more detailed error info
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
     
     def _send_telegram_message(self, message):
         """Send message via Telegram bot"""
