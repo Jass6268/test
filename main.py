@@ -346,11 +346,12 @@ class SimpleUploadChecker(FileSystemEventHandler):
                 pass
 
     def _send_cancel_notification(self, filename):
-        """Send notification that processing was cancelled"""
+        """Send notification that processing was cancelled - FIXED FOR ERROR 400"""
         try:
             next_files = self.file_queue.get_queue_status()['next_files']
             next_info = f"\nNext in queue: {', '.join(next_files[:2])}" if next_files else "\nQueue is empty"
             
+            # Simple message without special formatting
             message = f"""❌ Processing Cancelled
 
 📁 Cancelled file: {filename}
@@ -359,10 +360,23 @@ class SimpleUploadChecker(FileSystemEventHandler):
 Use /status to check queue status"""
 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-            requests.post(url, data=data, timeout=10)
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID, 
+                "text": message
+            }
             
-            logger.info(f"Cancel notification sent for: {filename}")
+            response = requests.post(url, data=data, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Cancel notification sent for: {filename}")
+            else:
+                logger.error(f"Cancel notification error: {response.text}")
+                
+                # Fallback simple message
+                simple_msg = f"❌ Cancelled: {filename}"
+                simple_data = {"chat_id": TELEGRAM_CHAT_ID, "text": simple_msg}
+                requests.post(url, data=simple_data, timeout=5)
+                
         except Exception as e:
             logger.error(f"Error sending cancel notification: {e}")
 
@@ -626,8 +640,12 @@ Use /status to check queue status"""
                 logger.error(f"Failed to open Google Photos: {e}")
 
     def _send_telegram_notification(self, filename, file_size, share_link):
-        """Send Telegram notification with file info and link - ENHANCED"""
+        """Send Telegram notification with file info and link - FIXED FOR ERROR 400"""
         try:
+            # Escape special characters for Telegram
+            safe_filename = filename.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]').replace('`', '\\`')
+            safe_link = share_link.replace('_', '\\_').replace('*', '\\*')
+            
             # Check if we got a proper photos.app.goo.gl link
             if 'photos.app.goo.gl' in share_link:
                 link_status = "✅ Permanent shareable link"
@@ -642,29 +660,62 @@ Use /status to check queue status"""
                 link_status = "✅ Shareable link"
                 link_emoji = "🔗"
 
-            message = f"""📱 **New video uploaded to Google Photos!**
+            # Create message without Markdown formatting to avoid parsing errors
+            message = f"""📱 New video uploaded to Google Photos!
 
-📁 **File:** {filename}
-📊 **Size:** {file_size / (1024*1024):.1f}MB
-{link_emoji} **Link:** {share_link}
+📁 File: {filename}
+📊 Size: {file_size / (1024*1024):.1f}MB
+{link_emoji} Link: {share_link}
 
 {link_status}
-✅ **Processed automatically from Bliss OS**"""
+✅ Processed automatically from Bliss OS"""
 
+            # First try without parse_mode
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {
                 "chat_id": TELEGRAM_CHAT_ID, 
-                "text": message,
-                "parse_mode": "Markdown"
+                "text": message
             }
-            response = requests.post(url, data=data, timeout=10)
+            
+            response = requests.post(url, data=data, timeout=15)
             
             if response.status_code == 200:
-                logger.info(f"✅ Telegram notification sent with {link_status}")
+                logger.info(f"✅ Telegram notification sent successfully")
             else:
-                logger.error(f"Telegram error: {response.text}")
+                logger.error(f"Telegram error {response.status_code}: {response.text}")
+                
+                # Try fallback method with shorter message
+                fallback_message = f"📱 Video uploaded: {filename}\n🔗 {share_link}\n✅ Done!"
+                
+                fallback_data = {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": fallback_message
+                }
+                
+                fallback_response = requests.post(url, data=fallback_data, timeout=10)
+                
+                if fallback_response.status_code == 200:
+                    logger.info("✅ Fallback Telegram notification sent")
+                else:
+                    logger.error(f"Fallback also failed: {fallback_response.text}")
+                    
         except Exception as e:
-            logger.error(f"Error sending Telegram: {e}")
+            logger.error(f"Error sending Telegram notification: {e}")
+            
+            # Last resort - very simple message
+            try:
+                simple_message = f"Video uploaded: {filename}"
+                simple_data = {
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": simple_message
+                }
+                
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                requests.post(url, data=simple_data, timeout=5)
+                logger.info("Simple notification sent as last resort")
+                
+            except Exception as final_error:
+                logger.error(f"All Telegram methods failed: {final_error}")
 
     def _force_stop_google_photos(self):
         """Force stop Google Photos app using multiple robust methods"""
