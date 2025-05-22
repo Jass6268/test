@@ -29,12 +29,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DCIM_FOLDER = "/path/to/dcim/camera"  # Replace with your actual path
+DCIM_FOLDER = "/sdcard/DCIM/Camera/"  # Replace with your actual path
 SCOPES = ['https://www.googleapis.com/auth/photoslibrary']
 TOKEN_FILE = 'token.json'
 CREDENTIALS_FILE = 'credentials.json'
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Replace with your bot token
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"  # Replace with your chat ID
+TELEGRAM_BOT_TOKEN = "8114381417:AAFlvW0cQBhv4LTi1m8pmMuR-zC_zl0MWpo"  # Replace with your bot token
+TELEGRAM_CHAT_ID = "6575149109"  # Replace with your chat ID
 
 class MkvHandler(FileSystemEventHandler):
     """Handler for MKV file events in the DCIM folder"""
