@@ -94,7 +94,7 @@ class AutomaticLatestHandler(FileSystemEventHandler):
             thread.start()
 
     def _process_file_automatic(self, file_path):
-        """Fully automatic file processing"""
+        """Fully automatic file processing with real-time detection"""
         filename = os.path.basename(file_path)
         upload_start_time = datetime.now()
         
@@ -117,37 +117,38 @@ class AutomaticLatestHandler(FileSystemEventHandler):
             self._open_google_photos()
             time.sleep(10)  # Let app start
             
-            # Step 3: Wait for upload with progress updates
-            upload_time = self._calculate_upload_time(file_size)
-            logger.info(f"⏳ Waiting {upload_time//60}m {upload_time%60}s for upload...")
+            # Step 3: Real-time upload detection (instead of blind waiting)
+            logger.info("🔍 Monitoring upload progress in real-time...")
             
-            # Send progress update
-            self._send_progress_notification(filename, upload_time)
+            upload_detected = self._monitor_upload_realtime(upload_start_time, filename, file_size)
             
-            # Wait for upload
-            time.sleep(upload_time)
-            
-            # Step 4: Find the latest uploaded file using API
-            logger.info("🔍 Searching for latest uploaded file using API...")
-            latest_media_item = self._find_latest_uploaded_file(upload_start_time, filename)
-            
-            if latest_media_item:
-                logger.info(f"✅ Found latest uploaded file: {latest_media_item.get('filename', 'Unknown')}")
+            if upload_detected:
+                logger.info("✅ Upload detected via real-time monitoring!")
                 
-                # Step 5: Create share link automatically
-                share_link = self._create_automatic_share_link(latest_media_item, filename)
+                # Step 4: Find the latest uploaded file using API
+                logger.info("🔍 Searching for uploaded file using API...")
+                latest_media_item = self._find_latest_uploaded_file(upload_start_time, filename)
                 
-                if share_link:
-                    # Step 6: Send success notification with link
-                    self._send_success_notification(filename, file_size, share_link)
-                    logger.info(f"✅ Automatic share link created: {share_link}")
+                if latest_media_item:
+                    logger.info(f"✅ Found uploaded file: {latest_media_item.get('filename', 'Unknown')}")
+                    
+                    # Step 5: Create share link automatically
+                    share_link = self._create_automatic_share_link(latest_media_item, filename)
+                    
+                    if share_link:
+                        # Step 6: Send success notification with link
+                        self._send_success_notification(filename, file_size, share_link)
+                        logger.info(f"✅ Automatic share link created: {share_link}")
+                    else:
+                        # Fallback: try alternative sharing method
+                        share_link = self._create_fallback_share_link(latest_media_item)
+                        self._send_partial_success_notification(filename, file_size, share_link)
                 else:
-                    # Fallback: try alternative sharing method
-                    share_link = self._create_fallback_share_link(latest_media_item)
-                    self._send_partial_success_notification(filename, file_size, share_link)
+                    logger.warning("❌ Could not find uploaded file in Google Photos")
+                    self._send_not_found_notification(filename)
             else:
-                logger.warning("❌ Could not find uploaded file in Google Photos")
-                self._send_not_found_notification(filename)
+                logger.warning("❌ Upload not detected within time limit")
+                self._send_timeout_notification(filename)
             
             # Step 7: Cleanup
             logger.info("🧹 Cleaning up...")
@@ -162,6 +163,157 @@ class AutomaticLatestHandler(FileSystemEventHandler):
                 self._force_stop_google_photos()
             except:
                 pass
+
+    def _monitor_upload_realtime(self, start_time, filename, file_size):
+        """Monitor upload progress in real-time using API polling"""
+        max_wait_time = self._calculate_max_wait_time(file_size)
+        check_interval = 15  # Check every 15 seconds
+        total_waited = 0
+        
+        logger.info(f"⏱️ Real-time monitoring started (max {max_wait_time//60}m)")
+        
+        # Send initial progress notification
+        self._send_realtime_start_notification(filename, max_wait_time)
+        
+        while total_waited < max_wait_time:
+            time.sleep(check_interval)
+            total_waited += check_interval
+            
+            # Check if file appeared in Google Photos
+            if self._check_upload_completion_api(start_time, filename):
+                elapsed_minutes = total_waited // 60
+                elapsed_seconds = total_waited % 60
+                logger.info(f"🎉 Upload detected after {elapsed_minutes}m {elapsed_seconds}s!")
+                
+                # Send quick completion notification
+                self._send_quick_detection_notification(filename, total_waited)
+                return True
+            
+            # Send progress update every minute
+            if total_waited % 60 == 0:
+                elapsed_minutes = total_waited // 60
+                remaining_minutes = (max_wait_time - total_waited) // 60
+                self._send_progress_update(filename, elapsed_minutes, remaining_minutes)
+        
+        logger.warning(f"⏰ Upload monitoring timeout after {max_wait_time//60} minutes")
+        return False
+
+    def _calculate_max_wait_time(self, file_size_bytes):
+        """Calculate maximum wait time - more aggressive than before"""
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        
+        # More aggressive timing (shorter waits)
+        if file_size_mb < 50:
+            return 120  # 2 minutes for small files
+        elif file_size_mb < 200:
+            return 300  # 5 minutes for medium files
+        elif file_size_mb < 500:
+            return 600  # 10 minutes for large files
+        elif file_size_mb < 1000:
+            return 900  # 15 minutes for very large files
+        else:
+            return 1200  # 20 minutes max for huge files
+
+    def _check_upload_completion_api(self, start_time, filename):
+        """Check if upload completed using API"""
+        if not self.google_photos_service:
+            return False
+        
+        try:
+            # Query recent uploads
+            results = self.google_photos_service.mediaItems().list(
+                pageSize=20  # Check only most recent 20 items
+            ).execute()
+            
+            media_items = results.get('mediaItems', [])
+            
+            for item in media_items:
+                try:
+                    # Check if it's a video uploaded recently
+                    mime_type = item.get('mimeType', '')
+                    if not mime_type.startswith('video/'):
+                        continue
+                    
+                    metadata = item.get('mediaMetadata', {})
+                    creation_time_str = metadata.get('creationTime', '')
+                    
+                    if creation_time_str:
+                        from dateutil import parser
+                        creation_time = parser.parse(creation_time_str)
+                        
+                        # Check if created after our start time
+                        time_diff = (creation_time - start_time).total_seconds()
+                        
+                        if -300 < time_diff < 3600:  # Between 5 min before and 1 hour after
+                            logger.info(f"📡 Found potential match: {item.get('filename', 'Unknown')}")
+                            return True
+                
+                except Exception as item_error:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"API check error: {e}")
+            return False
+
+    def _send_realtime_start_notification(self, filename, max_wait):
+        """Send notification about real-time monitoring"""
+        message = f"""⚡ REAL-TIME MONITORING ACTIVE
+
+📁 File: {filename}
+🔍 Mode: Live upload detection
+⏰ Max wait: {max_wait//60}m (usually much faster!)
+
+📡 Checking Google Photos API every 15 seconds
+🚀 You'll get notified the moment upload completes!"""
+
+        self._send_telegram_message(message)
+
+    def _send_progress_update(self, filename, elapsed_min, remaining_min):
+        """Send progress update"""
+        message = f"""⏳ UPLOAD MONITORING - {elapsed_min}m elapsed
+
+📁 File: {filename}
+📡 Still checking Google Photos API...
+⏰ Max remaining: {remaining_min}m
+
+🔍 Checking every 15 seconds for instant detection"""
+
+        self._send_telegram_message(message)
+
+    def _send_quick_detection_notification(self, filename, detection_time):
+        """Send notification about quick detection"""
+        minutes = detection_time // 60
+        seconds = detection_time % 60
+        
+        message = f"""⚡ UPLOAD DETECTED INSTANTLY!
+
+📁 File: {filename}
+⏱️ Detection time: {minutes}m {seconds}s
+📡 Found via real-time API monitoring
+
+🔗 Creating share link now...
+🚀 Much faster than waiting fixed time!"""
+
+        self._send_telegram_message(message)
+
+    def _send_timeout_notification(self, filename):
+        """Send timeout notification"""
+        message = f"""⏰ UPLOAD TIMEOUT
+
+📁 File: {filename}
+📱 Status: Not detected in Google Photos within time limit
+
+🔧 Possible issues:
+- Google Photos auto-backup disabled
+- Network connection problems  
+- File format not supported
+- Google account storage full
+
+🗑️ Original file deleted anyway"""
+
+        self._send_telegram_message(message)
 
     def _calculate_upload_time(self, file_size_bytes):
         """Calculate upload time based on file size"""
