@@ -65,6 +65,26 @@ def clean_filename(filename):
     # Rejoin with the extension
     return cleaned_name + ext
 
+def validate_filename(filename):
+    """
+    Validate and sanitize filename to ensure it's safe for file system
+    """
+    # Remove or replace invalid characters for Android/Linux filesystem
+    invalid_chars = ['<', '>', ':', '"', '|', '?', '*', '\\', '/']
+    for char in invalid_chars:
+        filename = filename.replace(char, '_')
+    
+    # Ensure filename is not empty and has reasonable length
+    if not filename.strip():
+        return "renamed_file"
+    
+    # Limit filename length (Android filesystem limit)
+    if len(filename) > 255:
+        name, ext = os.path.splitext(filename)
+        filename = name[:250] + ext
+    
+    return filename.strip()
+
 async def get_filename_from_url(session, url):
     try:
         # Try to get filename from Content-Disposition header
@@ -90,7 +110,7 @@ async def get_filename_from_url(session, url):
     if url_filename:
         return clean_filename(url_filename)
     else:
-        return "file.mp4"  # Default filename
+        return "file.mkv"  # Default filename
 
 async def download_with_progress(url, dest_path, message, context, chat_id):
     try:
@@ -275,6 +295,79 @@ async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(
                 text="This download is no longer active."
             )
+
+async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /rename command to download and rename files
+    Usage: /rename <url> <new_filename_with_extension>
+    """
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Usage: /rename <url> <new_filename_with_extension>\n\n"
+                "Examples:\n"
+                "• /rename https://example.com/file.mp4 my_movie.mp4\n"
+                "• /rename https://example.com/video thor_2011.mkv\n"
+                "• /rename https://example.com/song.mp3 favorite_song.mp3"
+            )
+            return
+
+        url = context.args[0]
+        new_filename = " ".join(context.args[1:])  # Allow spaces in filename
+        
+        # Validate URL
+        if not url.startswith(('http://', 'https://')):
+            await update.message.reply_text("❌ Please provide a valid URL starting with http:// or https://")
+            return
+        
+        # Validate and sanitize the new filename
+        new_filename = validate_filename(new_filename)
+        
+        # If no extension provided, try to detect from URL or add default
+        if '.' not in new_filename:
+            async with aiohttp.ClientSession() as session:
+                original_filename = await get_filename_from_url(session, url)
+                original_ext = os.path.splitext(original_filename)[1]
+                if original_ext:
+                    new_filename += original_ext
+                else:
+                    new_filename += ".mp4"  # Default extension
+        
+        temp_file_path = os.path.join(tempfile.gettempdir(), new_filename)
+        msg = await update.message.reply_text(f"📝 Downloading and renaming to: {new_filename}")
+        
+        try:
+            final_path = await download_with_progress(url, temp_file_path, msg, context, update.effective_chat.id)
+            
+            if not os.path.exists(final_path):
+                await update.message.reply_text("❌ Download failed. File not found.")
+                return
+
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"✅ Download complete: {new_filename}"
+            )
+
+            dest_path = os.path.join(GOOGLE_PHOTOS_FOLDER, new_filename)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: shutil.move(final_path, dest_path))
+            
+            # Set file timestamp to current IST time
+            await loop.run_in_executor(None, lambda: set_file_timestamp_to_ist(dest_path))
+            
+            await loop.run_in_executor(None, lambda: os.system(f"termux-media-scan '{dest_path}'"))
+
+            current_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            await update.message.reply_text(f"✅ File renamed and uploaded: {new_filename}\n🕒 {current_ist}")
+        except asyncio.CancelledError:
+            # Download was cancelled, do nothing as it's already handled
+            pass
+
+    except Exception as e:
+        logging.exception("Error in handle_rename")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def handle_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -574,6 +667,9 @@ if __name__ == '__main__':
     async def wrapper_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_l(update, context))
 
+    async def wrapper_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(handle_rename(update, context))
+
     async def wrapper_unzip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(handle_unzip(update, context))
 
@@ -593,9 +689,10 @@ if __name__ == '__main__':
         asyncio.create_task(handle_fix_timestamps(update, context))
 
     app.add_handler(CommandHandler("l", wrapper_l))
+    app.add_handler(CommandHandler("rename", wrapper_rename))  # New rename command
     app.add_handler(CommandHandler("unzip", wrapper_unzip))
     app.add_handler(CommandHandler("clean", wrapper_clean))
-    app.add_handler(CommandHandler("fix_timestamps", wrapper_fix_timestamps))  # New command
+    app.add_handler(CommandHandler("fix_timestamps", wrapper_fix_timestamps))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wrapper_direct))
     app.add_handler(CommandHandler("force_stop", wrapper_force_stop))
     app.add_handler(CommandHandler("force_start", wrapper_force_start))
@@ -603,5 +700,5 @@ if __name__ == '__main__':
     # Add callback handler for cancel button
     app.add_handler(CallbackQueryHandler(handle_cancel_callback))
 
-    print("🤖 Bot running with IST file timestamps...")
+    print("🤖 Bot running with IST file timestamps and rename functionality...")
     app.run_polling()
